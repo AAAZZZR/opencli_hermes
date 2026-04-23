@@ -1,0 +1,11 @@
+# Phase 1: Manual mapping of node_id -> logged-in sites.
+# Phase 2 replaces this with auto-detection at WS handshake.
+#
+# Example:
+# alice-mbp:
+#   - xiaohongshu
+#   - zhihu
+#   - bilibili
+# bob-win:
+#   - weibo
+#   - twitter
