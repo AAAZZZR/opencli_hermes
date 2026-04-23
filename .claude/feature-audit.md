@@ -1,130 +1,89 @@
-# opencli-admin Feature Audit & Rewrite Decision Matrix
+# opencli-admin Feature Audit & Rewrite Decision (2026-04-23)
 
-> Comprehensive comparison of opencli-admin features against our spec requirements.
-> Used to decide what to keep, simplify, or drop in the rewrite.
+> History note: the user evaluated `xjh1994/opencli-admin` as a possible
+> upstream dependency, then decided on 2026-04-23 to rewrite the relevant
+> pieces ourselves as `fleet-hub` + `fleet-agent`. This doc records what
+> was dropped vs what we re-implemented, so future work doesn't have to
+> re-derive the rationale.
 
 ## Source
 
 - **opencli-admin repo:** https://github.com/xjh1994/opencli-admin
-- **Total LOC:** ~24,700 (8K Python backend + 10K TypeScript frontend + 6.5K tests)
-- **Our spec:** `.claude/spec.md`
+- **opencli-admin size:** ~24,700 LOC (8K Python backend + 10K TS frontend + 6.5K tests)
+- **Our implementation:** `fleet-hub/` + `fleet-agent/` in this monorepo
 
 ---
 
-## Core Infrastructure
+## What we re-implemented from scratch
 
-| Feature | opencli-admin | Lines | Decision | Rationale |
-|---------|--------------|-------|----------|-----------|
-| WS Hub (ws_agent_manager) | asyncio.Future dispatch, ping/pong keepalive | 107 | ✅ Keep | Core of the system — nodes connect via WSS |
-| Node Management | Register, online/offline tracking, events, stats | 533 | ✅ Simplify | Keep register + status. Drop per-node stats/events detail |
-| DB + Migrations | SQLAlchemy async + Alembic, SQLite/Postgres | 97 | ✅ Simplify | SQLite only for Phase 1. Keep Alembic |
-| Config System | pydantic-settings, env-driven | 106 | ✅ Keep | Already have this |
-| Health Endpoint | GET /health | trivial | ✅ Keep | Monitoring baseline |
+All implemented in `fleet-hub/src/fleet_hub/` or `fleet-agent/src/fleet_agent/`:
 
-## Collection Pipeline
+| Feature | Where | Notes |
+|---------|-------|-------|
+| WS hub (connection manager + dispatch futures) | `fleet-hub/ws/manager.py` | asyncio.Future per task, pending cleanup on disconnect |
+| Nodes CRUD + WS endpoint | `fleet-hub/api/nodes.py` | Accepts label or UUID, token on WS handshake |
+| Tasks REST (POST / GET / records) | `fleet-hub/api/tasks.py` | `wait=true` for synchronous dispatch |
+| Collection pipeline | `fleet-hub/pipeline/{normalize,store}.py` | Field-alias → content-hash → insert-if-new |
+| Content dedup (SHA-256) | `fleet-hub/pipeline/normalize.py` | Keyed on `site\|command\|id\|title\|url\|content`, per-task unique |
+| Install script | `fleet-hub/scripts/install-agent.sh` + `api/install.py` | Served by `/api/v1/nodes/install/agent.sh?label=X`, with token substituted |
+| Agent WS client | `fleet-agent/ws_client.py` | Reconnect, ping/pong, concurrent dispatch handling |
+| Agent subprocess runner | `fleet-agent/runner.py` | Maps OpenCLI exit codes (77=AUTH_REQUIRED etc), timeout-kill, error-envelope parse |
+| Login detection | `fleet-agent/login_detect.py` | Cheap probes per candidate site at register time |
 
-| Feature | opencli-admin | Lines | Decision | Rationale |
-|---------|--------------|-------|----------|-----------|
-| Pipeline Orchestrator | collect→normalize→store→AI→notify | 252 | ⚡ Simplify | Keep collect→normalize→store. AI and notify as optional hooks |
-| opencli Channel | Local/HTTP/WS dispatch, parser, pool integration | 469 | ⚡ Simplify | Drop local execution path. Keep WS agent dispatch only |
-| web_scraper Channel | httpx + BeautifulSoup | 72 | 🤔 Optional | Direct web scraping without opencli |
-| api Channel | REST/GraphQL with auth | 111 | 🤔 Optional | Direct API calls, useful for structured data sources |
-| rss Channel | feedparser | 70 | 🤔 Optional | Spec Phase 3 mentions "non-opencli channels: RSS, direct API" |
-| cli Channel | Arbitrary subprocess | 87 | ❌ Drop | Security risk — equivalent to eval/exec |
-| Normalizer | Field aliasing to standard schema | 96 | ✅ Keep | Unifies output across different sites |
-| Dedup (content hash) | SHA-256 per source | 52 | ✅ Keep | Prevents duplicate records |
-| Pipeline Events | Structured execution trace per run | 32 | ⚡ Simplify | Keep basic logging. Drop TaskRunEvent table |
-
-## Scheduling
-
-| Feature | opencli-admin | Lines | Decision | Rationale |
-|---------|--------------|-------|----------|-----------|
-| Cron Scheduler | croniter, 60s poll loop | 82 | ✅ Keep | Required — "every morning, check zhihu hot list" |
-| One-time Schedules | is_one_time flag, auto-disable | trivial | ✅ Keep | Comes with cron for free |
-| Timezone Support | Field exists but UTC evaluation | trivial | ⚡ Fix | Store and actually evaluate in correct timezone |
-| Celery Beat | Distributed scheduling | 82 | ❌ Drop | Using local executor, no Celery |
-
-## AI Processing
-
-| Feature | opencli-admin | Lines | Decision | Rationale |
-|---------|--------------|-------|----------|-----------|
-| Claude Processor | Per-record AI enrichment | 80 | ❌ Drop | Hermes IS the LLM — it summarizes results directly |
-| OpenAI Processor | Per-record AI enrichment | 84 | ❌ Drop | Same reason |
-| Local Processor | Ollama/OpenAI-compat | 73 | ❌ Drop | Same reason |
-| Model Provider CRUD | Store API keys, models | 20 | ❌ Drop | Not needed without AI processors |
-| AI Agent CRUD | Prompt templates, configs | 23 | ❌ Drop | Not needed without AI processors |
-
-## Notifications
-
-| Feature | opencli-admin | Lines | Decision | Rationale |
-|---------|--------------|-------|----------|-----------|
-| Notification Rules Engine | Source-triggered rules | 100 | 🤔 Optional | Hermes could handle this, but built-in is nice |
-| Webhook Notifier | HTTP POST + HMAC | 42 | 🤔 Optional | Generic integration point |
-| Email Notifier | SMTP + aiosmtplib | 50 | 🤔 Optional | Direct email alerts |
-| DingTalk Notifier | 钉钉 robot webhook | 63 | 🤔 Optional | Chinese team communication |
-| Feishu Notifier | 飞书 incoming webhook | 70 | 🤔 Optional | Chinese team communication |
-| WeCom Notifier | 企业微信 group robot | 36 | 🤔 Optional | Chinese team communication |
-
-## Browser Management
-
-| Feature | opencli-admin | Lines | Decision | Rationale |
-|---------|--------------|-------|----------|-----------|
-| Browser Pool (Local) | Per-endpoint asyncio.Queue slots | 319 | ❌ Drop | Chrome runs on laptops, not VPS |
-| Browser Pool (Redis) | Distributed locking | (above) | ❌ Drop | No Redis, no distributed pool |
-| Browser Bindings | site→Chrome endpoint | 14 | ⚡ Merge | Replace with node_sites.yaml mapping |
-| Docker Chrome Mgmt | Dynamic container create/delete | ~150 | ❌ Drop | Laptops manage their own Chrome |
-| Chrome Extension | Bridge mode extension | ~700 | ❌ Drop | CDP mode only |
-
-## Node Agent Side
-
-| Feature | opencli-admin | Lines | Decision | Rationale |
-|---------|--------------|-------|----------|-----------|
-| agent_server.py | FastAPI + WS client + opencli runner | 448 | ⚡ Simplify | Drop HTTP mode, Docker remapping. Keep WS + opencli exec |
-| Install Script | Docker + Python dual-mode installer | 303 | ⚡ Simplify | Drop Docker install path. Native Python only |
-| WS Auto-reconnect | Exponential backoff 3s–60s | ~30 | ✅ Keep | Laptops disconnect frequently |
-| Ping/Pong Keepalive | 30s interval, 10s timeout | ~10 | ✅ Keep | Detect dead connections |
-
-## Storage & Query
-
-| Feature | opencli-admin | Lines | Decision | Rationale |
-|---------|--------------|-------|----------|-----------|
-| Records CRUD | Store, search, batch delete | 80 | ✅ Keep | Collected data must persist |
-| Tasks CRUD | Task lifecycle tracking | 120 | ✅ Simplify | Keep task records. Drop runs/events detail |
-| Sources CRUD | Data source definitions | 81 | ✅ Keep | Defines "what to collect" |
-| Webhook Trigger | External HMAC-verified trigger | 65 | 🤔 Optional | Let external systems trigger collection |
-
-## Frontend & Monitoring
-
-| Feature | opencli-admin | Lines | Decision | Rationale |
-|---------|--------------|-------|----------|-----------|
-| React Frontend | 10 pages, full CRUD UI | ~10K | 🤔 Phase 2 | CLI-first via Hermes. UI later |
-| Dashboard Stats | Aggregated queries, charts | 223 | 🤔 Phase 2 | Nice but not MVP |
-| i18n (EN/ZH) | Full bilingual support | ~1K | 🤔 Phase 2 | Comes with frontend |
-
-## Definitively Dropped
-
-| Feature | Rationale |
-|---------|-----------|
-| Celery (worker/beat/redis) | 2–10 nodes doesn't need distributed task queue |
-| AI Agent + Provider management | Hermes is the AI layer |
-| Browser Pool (local + Redis) | Chrome is on laptops, not VPS |
-| Chrome Extension (Bridge mode) | CDP mode only |
-| cli Channel | Security risk — arbitrary command execution |
-| System API (live .env edit) | Edit config and restart |
-| Workers API (Celery inspect) | No Celery |
-| Docker Chrome management | Laptops manage their own Chrome |
+Per-node tokens are first-class, unlike opencli-admin where they don't exist:
+a `token` column on `nodes`, generated on `POST /nodes`, validated on WS
+handshake.
 
 ---
 
-## Estimated Rewrite Size
+## What we intentionally dropped (and why)
 
-| Component | Est. Lines | Based On |
-|-----------|-----------|----------|
-| Hub (FastAPI + WS + HTTP API) | ~400 | opencli-admin ws_manager(107) + nodes(533) simplified |
-| MCP Server (6 tools) | ~250 | Already written |
-| Security (whitelist, rate limit, audit, sanitize) | ~150 | Already written |
-| Pipeline (collect→normalize→store) | ~300 | opencli-admin pipeline(252) + normalizer(96) + storer(52) simplified |
-| Scheduler (cron) | ~80 | Reuse opencli-admin's approach |
-| Agent (laptop-side) | ~200 | opencli-admin agent_server(448) simplified |
-| Config + Schemas + DB models | ~200 | Already partially written |
-| **Total** | **~1,600** | vs. opencli-admin's ~8,000 backend |
+| Feature (opencli-admin LOC) | Why dropped |
+|--------|-------|
+| Celery + beat + Redis (workers API) | 2–10 nodes doesn't need distributed task queue; asyncio is enough. |
+| AI Agent CRUD (23 LOC) + providers CRUD (20) | Hermes IS the AI layer — we don't need hub-side LLM calls. |
+| 3 AI processors (Claude/OpenAI/Local, ~237 LOC) | Same. |
+| Browser pool (local+Redis, ~319 LOC) | Chrome lives on laptops, not the VPS. No shared pool needed. |
+| Docker Chrome management (~150 LOC) | Laptops manage their own Chrome (manual login). |
+| Chrome extension "Bridge mode" admin (~700 LOC) | Bridge is opencli's own; admin doesn't need to configure it. |
+| `cli` channel (arbitrary subprocess) | Security — we explicitly forbid `register`/`install`/`plugin` in fleet-mcp. |
+| `rss` / `api` / `web_scraper` channels (~253 LOC) | Phase 3 maybe. For now, all collection is via `opencli` (agent-executed). |
+| Notification rules engine + Webhook/Email/DingTalk/Feishu/WeCom (~361 LOC) | Hermes + Telegram/email already cover this. |
+| System API (live `.env` edit, restart) | Edit config and restart the service manually. |
+| React frontend (~10K LOC) + i18n (~1K) + Dashboard stats (223) | CLI-first via Hermes. The `docs/` has curl examples. |
+
+---
+
+## Implementation stats
+
+From the current repo:
+
+| Package | Source LOC | Test LOC | Tests |
+|---------|-----------|----------|-------|
+| `fleet-mcp` | ~600 | ~500 | 44 passing |
+| `fleet-hub` | ~700 | ~600 | 35 passing |
+| `fleet-agent` | ~400 | ~400 | 24 passing |
+| **Total** | **~1,700** | **~1,500** | **103** |
+
+Compared to opencli-admin's 8,000-LOC backend, we ship ~20% of the code for
+the pieces we need. The rest is covered by Hermes.
+
+---
+
+## What the rewrite also fixed (vs reuse)
+
+1. **Endpoint path:** opencli-admin uses `/api/v1/sources`, we use
+   `/api/v1/tasks` directly (no Source abstraction — Hermes requests a
+   site+command, hub dispatches).
+2. **Per-node tokens:** first-class. opencli-admin has no per-node auth.
+3. **WS auth on handshake:** opencli-admin accepts any `agent_url` without
+   verification. We validate a token.
+4. **Node identifier:** accepts either label or UUID in REST calls; Hermes
+   can use the human-friendly label.
+5. **Async-friendly contract:** `POST /tasks` with `wait=true` does the
+   whole thing in one round-trip (dispatch → wait for WS result → store).
+   opencli-admin requires caller to poll `GET /tasks/{id}`.
+6. **Error-code taxonomy:** OpenCLI exit codes (66/69/75/77/78) propagate
+   through WS result frames to hub's `Task.error_code` to fleet-mcp's
+   `DispatchResult.error_code` — useful for Hermes to distinguish "logged
+   out" from "timeout" from "empty results".

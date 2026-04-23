@@ -1,0 +1,27 @@
+# Hermes config snippet — merge into ~/.hermes/config.yaml
+#
+# Hermes filters the subprocess env (allowlist + anything under `env:`),
+# and does NOT honour `cwd:` (confirmed against tools/mcp_tool.py upstream).
+# So: use the absolute path to the venv Python, and pass PYTHONPATH via env.
+
+mcp_servers:
+  fleet:
+    # Absolute path to the venv python — don't rely on PATH.
+    command: "/opt/opencli_agent/fleet-mcp/.venv/bin/python"
+    args: ["-m", "fleet_mcp"]
+    env:
+      HUB_URL: "http://localhost:8031"
+      PYTHONPATH: "/opt/opencli_agent/fleet-mcp/src"
+      MAX_ITEMS_INLINE: "50"
+      TASK_TIMEOUT_SEC: "120"
+      LOG_LEVEL: "INFO"
+    connect_timeout: 30
+    timeout: 180
+    tools:
+      include:
+        - list_nodes
+        - list_supported_sites
+        - dispatch
+        - dispatch_best
+        - broadcast
+        - get_task_status

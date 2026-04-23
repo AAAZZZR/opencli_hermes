@@ -34,3 +34,10 @@ htmlcov/
 
 # uv
 fleet-mcp/uv.lock
+fleet-hub/uv.lock
+fleet-agent/uv.lock
+
+# DB + audit artifacts
+*.db
+*.db-journal
+fleet-hub/fleet_hub.db*

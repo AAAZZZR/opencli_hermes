@@ -1,81 +1,53 @@
-"""Pydantic models for MCP tool I/O and opencli-admin API shapes."""
+"""Pydantic models for MCP tool I/O and fleet-hub API shapes."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, Field
-
-
-# ---------------------------------------------------------------------------
-# opencli-admin API response envelope
-# ---------------------------------------------------------------------------
-
-class AdminMeta(BaseModel):
-    total: int | None = None
-    page: int | None = None
-    limit: int | None = None
-    pages: int | None = None
-
-
-class AdminResponse(BaseModel):
-    """Generic wrapper returned by every opencli-admin endpoint."""
-    success: bool
-    data: dict | list | None = None
-    error: str | None = None
-    meta: AdminMeta | None = None
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
-# opencli-admin domain models (partial — only what fleet-mcp needs)
+# fleet-hub domain models
 # ---------------------------------------------------------------------------
 
-class AdminNode(BaseModel):
+class HubNode(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     id: str
-    url: str
-    label: str | None = None
-    protocol: str = "ws"
-    mode: str = "cdp"
-    node_type: str = "shell"
-    status: str = "offline"
+    label: str
+    status: str = "offline"           # online | offline
+    mode: str | None = None           # bridge | cdp
+    os: str | None = None
+    logged_in_sites: list[str] = Field(default_factory=list)
+    opencli_version: str | None = None
     last_seen_at: datetime | None = None
-
-
-class AdminSource(BaseModel):
-    id: str
-    name: str
-    channel_type: str = "opencli"
-    channel_config: dict = Field(default_factory=dict)
-    enabled: bool = True
-
-
-class AdminTask(BaseModel):
-    id: str
-    source_id: str
-    status: str = "pending"
-    error_message: str | None = None
     created_at: datetime | None = None
-    updated_at: datetime | None = None
 
 
-class AdminTaskRun(BaseModel):
+class HubTaskResult(BaseModel):
+    """Response from POST /api/v1/tasks when wait=true."""
+    model_config = ConfigDict(extra="ignore")
     id: str
-    task_id: str
-    status: str = "pending"
-    node_url: str | None = None
+    node_id: str
+    site: str
+    command: str
+    status: str                       # pending | running | completed | failed | timeout | cancelled
+    error_code: str | None = None
+    error_message: str | None = None
+    exit_code: int | None = None
+    items_total: int = 0
+    items_stored: int = 0
     duration_ms: int | None = None
-    records_collected: int | None = None
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
 
 
-class AdminRecord(BaseModel):
-    id: str
-    task_id: str | None = None
-    source_id: str | None = None
-    raw_data: dict | None = None
-    normalized_data: dict | None = None
-    status: str = "raw"
+class HubRecordList(BaseModel):
+    items: list[dict[str, Any]]
+    total: int
 
 
 # ---------------------------------------------------------------------------
@@ -84,11 +56,13 @@ class AdminRecord(BaseModel):
 
 class NodeInfo(BaseModel):
     node_id: str
-    label: str | None = None
+    label: str
     online: bool
     last_seen: datetime | None = None
     logged_in_sites: list[str] = Field(default_factory=list)
-    chrome_mode: str = "cdp"
+    chrome_mode: str | None = None
+    os: str | None = None
+    opencli_version: str | None = None
 
 
 class SiteInfo(BaseModel):
@@ -106,6 +80,8 @@ class DispatchResult(BaseModel):
     total_items: int = 0
     duration_ms: int | None = None
     error: str | None = None
+    error_code: str | None = None
+    exit_code: int | None = None
 
 
 class BroadcastNodeResult(BaseModel):
@@ -113,6 +89,7 @@ class BroadcastNodeResult(BaseModel):
     success: bool
     items: list[dict] = Field(default_factory=list)
     error: str | None = None
+    error_code: str | None = None
 
 
 class BroadcastResult(BaseModel):
@@ -126,3 +103,4 @@ class TaskStatusResult(BaseModel):
     items: list[dict] = Field(default_factory=list)
     total_items: int = 0
     error: str | None = None
+    error_code: str | None = None

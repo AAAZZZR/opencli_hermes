@@ -1,0 +1,25 @@
+[Unit]
+Description=fleet-hub — OpenCLI fleet central
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=/opt/opencli_agent/fleet-hub
+EnvironmentFile=/opt/opencli_agent/fleet-hub/.env
+ExecStart=/opt/opencli_agent/fleet-hub/.venv/bin/python -m fleet_hub
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/opencli_agent/fleet-hub /home/__USER__/.fleet-hub
+
+[Install]
+WantedBy=multi-user.target

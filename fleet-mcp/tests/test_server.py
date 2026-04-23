@@ -1,26 +1,84 @@
-"""Tests for MCP server tools using FastMCP in-memory client."""
+"""Tests for MCP server tools using FastMCP in-memory client.
+
+hub_client is patched so tests don't require a running fleet-hub.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
 
 import pytest
-import respx
 from fastmcp import Client
-from httpx import Response
 
-from fleet_mcp.admin_client import _source_cache
-from fleet_mcp.server import mcp
+from fleet_mcp import hub_client, server
+from fleet_mcp.schemas import HubNode, HubRecordList, HubTaskResult
+from fleet_mcp.security import RateLimiter
 
-BASE = "http://localhost:8031/api/v1"
+
+def _make_node(
+    label: str,
+    *,
+    online: bool = True,
+    sites: list[str] | None = None,
+    last_seen_iso: str = "2026-04-23T10:00:00+00:00",
+) -> HubNode:
+    return HubNode.model_validate({
+        "id": f"id-{label}",
+        "label": label,
+        "status": "online" if online else "offline",
+        "mode": "bridge",
+        "os": "darwin",
+        "logged_in_sites": sites or [],
+        "opencli_version": "1.7.7",
+        "last_seen_at": last_seen_iso,
+        "created_at": "2026-04-20T00:00:00+00:00",
+    })
+
+
+def _make_task(
+    *,
+    status: str = "completed",
+    node_id: str = "alice",
+    site: str = "zhihu",
+    command: str = "hot",
+    items: list[dict] | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    exit_code: int | None = None,
+) -> HubTaskResult:
+    return HubTaskResult.model_validate({
+        "id": "task-x",
+        "node_id": node_id,
+        "site": site,
+        "command": command,
+        "args": {}, "positional_args": [],
+        "format": "json", "timeout_sec": 120,
+        "status": status,
+        "items_total": len(items or []),
+        "items_stored": len(items or []),
+        "duration_ms": 100,
+        "items": items or [],
+        "error_code": error_code,
+        "error_message": error_message,
+        "exit_code": exit_code,
+        "created_at": "2026-04-23T10:00:00+00:00",
+    })
 
 
 @pytest.fixture(autouse=True)
-def _clear_caches():
-    _source_cache.clear()
-    yield
-    _source_cache.clear()
+def _reset_rate_limiter(monkeypatch):
+    # Fresh buckets per test so rate limits don't leak across tests.
+    monkeypatch.setattr(
+        "fleet_mcp.server.rate_limiter",
+        RateLimiter(per_node_rpm=6000, global_rpm=6000),
+    )
 
 
 @pytest.fixture
 async def client():
-    async with Client(mcp) as c:
+    async with Client(server.mcp) as c:
         yield c
 
 
@@ -35,7 +93,6 @@ async def test_list_supported_sites(client: Client):
     sites = {s["site"] for s in data["sites"]}
     assert "xiaohongshu" in sites
     assert "zhihu" in sites
-    # Each site should have commands and description
     for s in data["sites"]:
         assert len(s["commands"]) > 0
         assert len(s["description"]) > 0
@@ -45,47 +102,27 @@ async def test_list_supported_sites(client: Client):
 # list_nodes
 # ---------------------------------------------------------------------------
 
-@respx.mock
-async def test_list_nodes_empty(client: Client):
-    respx.get(f"{BASE}/nodes").mock(
-        return_value=Response(200, json={"success": True, "data": []})
-    )
-    result = await client.call_tool("list_nodes", {})
-    assert result.data["nodes"] == []
+async def test_list_nodes(client: Client, monkeypatch):
+    async def _fake() -> list[HubNode]:
+        return [_make_node("alice", online=True, sites=["zhihu", "xiaohongshu"])]
 
-
-@respx.mock
-async def test_list_nodes_with_data(client: Client):
-    respx.get(f"{BASE}/nodes").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": [{
-                "id": "abc",
-                "url": "http://192.168.1.1:19823",
-                "label": "test-node",
-                "status": "online",
-                "mode": "cdp",
-                "protocol": "ws",
-                "node_type": "shell",
-            }],
-        })
-    )
+    monkeypatch.setattr(hub_client, "list_nodes", _fake)
     result = await client.call_tool("list_nodes", {})
     nodes = result.data["nodes"]
     assert len(nodes) == 1
-    assert nodes[0]["node_id"] == "test-node"
+    assert nodes[0]["node_id"] == "alice"
     assert nodes[0]["online"] is True
+    assert "zhihu" in nodes[0]["logged_in_sites"]
+    assert nodes[0]["opencli_version"] == "1.7.7"
 
 
 # ---------------------------------------------------------------------------
-# dispatch — whitelist rejection
+# dispatch — whitelist
 # ---------------------------------------------------------------------------
 
 async def test_dispatch_rejects_unknown_site(client: Client):
     result = await client.call_tool("dispatch", {
-        "node_id": "test",
-        "site": "unknown_site",
-        "command": "search",
+        "node_id": "alice", "site": "unknown", "command": "search",
     })
     data = result.data
     assert data["success"] is False
@@ -94,182 +131,280 @@ async def test_dispatch_rejects_unknown_site(client: Client):
 
 async def test_dispatch_rejects_forbidden_command(client: Client):
     result = await client.call_tool("dispatch", {
-        "node_id": "test",
-        "site": "xiaohongshu",
-        "command": "eval",
+        "node_id": "alice", "site": "xiaohongshu", "command": "eval",
     })
     data = result.data
     assert data["success"] is False
     assert "forbidden" in data["error"].lower()
 
 
-async def test_dispatch_rejects_unknown_command(client: Client):
-    result = await client.call_tool("dispatch", {
-        "node_id": "test",
-        "site": "zhihu",
-        "command": "delete",
-    })
-    data = result.data
-    assert data["success"] is False
-    assert "not allowed" in data["error"].lower()
+async def test_dispatch_rejects_new_forbidden_commands(client: Client):
+    # install/plugin are newly added to the forbidden list
+    for cmd in ("install", "plugin", "daemon", "record"):
+        result = await client.call_tool("dispatch", {
+            "node_id": "alice", "site": "zhihu", "command": cmd,
+        })
+        data = result.data
+        assert data["success"] is False
+        assert "forbidden" in data["error"].lower(), f"{cmd} should be forbidden"
 
 
 # ---------------------------------------------------------------------------
-# dispatch — success path
+# dispatch — success & failure paths
 # ---------------------------------------------------------------------------
 
-@respx.mock
-async def test_dispatch_success(client: Client):
-    # ensure_source
-    respx.get(f"{BASE}/sources").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": [{
-                "id": "src-z",
-                "name": "fleet:zhihu:hot",
-                "channel_type": "opencli",
-                "channel_config": {"site": "zhihu", "command": "hot"},
-                "enabled": True,
-            }],
-        })
-    )
-    # trigger
-    respx.post(f"{BASE}/tasks/trigger").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": {"id": "t1", "source_id": "src-z", "status": "pending"},
-        })
-    )
-    # poll -> completed
-    respx.get(f"{BASE}/tasks/t1").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": {"id": "t1", "source_id": "src-z", "status": "completed"},
-        })
-    )
-    # records
-    respx.get(f"{BASE}/records").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": [
-                {"id": "r1", "task_id": "t1", "raw_data": {"title": "hot topic 1"}, "status": "raw"},
-                {"id": "r2", "task_id": "t1", "raw_data": {"title": "hot topic 2"}, "status": "raw"},
-            ],
-        })
-    )
+async def test_dispatch_success(client: Client, monkeypatch):
+    async def _fake(**kwargs: Any) -> HubTaskResult:
+        return _make_task(items=[{"title": "hot #1"}, {"title": "hot #2"}])
+
+    monkeypatch.setattr(hub_client, "dispatch", _fake)
 
     result = await client.call_tool("dispatch", {
-        "node_id": "test-node",
-        "site": "zhihu",
-        "command": "hot",
+        "node_id": "alice", "site": "zhihu", "command": "hot",
     })
     data = result.data
     assert data["success"] is True
-    assert data["node_id"] == "test-node"
-    assert data["task_id"] == "t1"
+    assert data["task_id"] == "task-x"
     assert len(data["items"]) == 2
 
 
+async def test_dispatch_failure_propagates_error_code(client: Client, monkeypatch):
+    async def _fake(**kwargs: Any) -> HubTaskResult:
+        return _make_task(
+            status="failed", items=[],
+            error_code="AUTH_REQUIRED", error_message="logged out",
+            exit_code=77,
+        )
+
+    monkeypatch.setattr(hub_client, "dispatch", _fake)
+
+    result = await client.call_tool("dispatch", {
+        "node_id": "alice", "site": "zhihu", "command": "hot",
+    })
+    data = result.data
+    assert data["success"] is False
+    assert data["error_code"] == "AUTH_REQUIRED"
+    assert data["exit_code"] == 77
+
+
+async def test_dispatch_hub_exception(client: Client, monkeypatch):
+    async def _fake(**kwargs: Any) -> HubTaskResult:
+        raise RuntimeError("hub unreachable")
+
+    monkeypatch.setattr(hub_client, "dispatch", _fake)
+
+    result = await client.call_tool("dispatch", {
+        "node_id": "alice", "site": "zhihu", "command": "hot",
+    })
+    data = result.data
+    assert data["success"] is False
+    assert "hub error" in data["error"]
+
+
+async def test_dispatch_sanitizes_items(client: Client, monkeypatch):
+    async def _fake(**kwargs: Any) -> HubTaskResult:
+        return _make_task(items=[{"title": "ok", "cookie": "x", "session_token": "y"}])
+
+    monkeypatch.setattr(hub_client, "dispatch", _fake)
+
+    result = await client.call_tool("dispatch", {
+        "node_id": "alice", "site": "xiaohongshu", "command": "search",
+    })
+    item = result.data["items"][0]
+    assert item["title"] == "ok"
+    assert "cookie" not in item
+    assert "session_token" not in item
+
+
+async def test_dispatch_truncates_large_results(client: Client, monkeypatch):
+    async def _fake(**kwargs: Any) -> HubTaskResult:
+        return _make_task(items=[{"id": i} for i in range(200)])
+
+    monkeypatch.setattr(hub_client, "dispatch", _fake)
+
+    result = await client.call_tool("dispatch", {
+        "node_id": "alice", "site": "zhihu", "command": "hot",
+    })
+    data = result.data
+    assert data["success"] is True
+    assert data["truncated"] is True
+    assert len(data["items"]) == 50  # MAX_ITEMS_INLINE default
+
+
 # ---------------------------------------------------------------------------
-# dispatch_best — no eligible node
+# dispatch_best
 # ---------------------------------------------------------------------------
 
-@respx.mock
-async def test_dispatch_best_no_nodes(client: Client):
-    respx.get(f"{BASE}/nodes").mock(
-        return_value=Response(200, json={"success": True, "data": []})
-    )
+async def test_dispatch_best_no_nodes(client: Client, monkeypatch):
+    async def _fake_list():
+        return []
+
+    monkeypatch.setattr(hub_client, "list_nodes", _fake_list)
+
     result = await client.call_tool("dispatch_best", {
-        "site": "zhihu",
-        "command": "hot",
+        "site": "zhihu", "command": "hot",
     })
     data = result.data
     assert data["success"] is False
     assert "no nodes" in data["error"].lower()
 
 
+async def test_dispatch_best_no_node_with_site(client: Client, monkeypatch):
+    async def _fake_list():
+        return [_make_node("alice", sites=["xiaohongshu"])]
+
+    monkeypatch.setattr(hub_client, "list_nodes", _fake_list)
+
+    result = await client.call_tool("dispatch_best", {
+        "site": "zhihu", "command": "hot",
+    })
+    data = result.data
+    assert data["success"] is False
+    assert "logged in to" in data["error"]
+
+
+async def test_dispatch_best_picks_lru(client: Client, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def _fake_list():
+        return [
+            _make_node("newer", sites=["zhihu"], last_seen_iso="2026-04-23T10:00:00+00:00"),
+            _make_node("older", sites=["zhihu"], last_seen_iso="2026-04-23T09:00:00+00:00"),
+        ]
+
+    async def _fake_dispatch(**kwargs: Any) -> HubTaskResult:
+        captured["node_id"] = kwargs["node_id"]
+        return _make_task(node_id=kwargs["node_id"], items=[])
+
+    monkeypatch.setattr(hub_client, "list_nodes", _fake_list)
+    monkeypatch.setattr(hub_client, "dispatch", _fake_dispatch)
+
+    result = await client.call_tool("dispatch_best", {
+        "site": "zhihu", "command": "hot",
+    })
+    assert result.data["success"] is True
+    assert captured["node_id"] == "older"
+
+
+async def test_dispatch_best_handles_none_last_seen(client: Client, monkeypatch):
+    """Regression: `last_seen_at: None` + `datetime` sentinel mix must not crash."""
+
+    async def _fake_list():
+        # One node has never been seen
+        n1 = _make_node("fresh", sites=["zhihu"])
+        n1.last_seen_at = None
+        n2 = _make_node("older", sites=["zhihu"], last_seen_iso="2026-04-23T09:00:00+00:00")
+        return [n1, n2]
+
+    async def _fake_dispatch(**kwargs: Any) -> HubTaskResult:
+        return _make_task(node_id=kwargs["node_id"])
+
+    monkeypatch.setattr(hub_client, "list_nodes", _fake_list)
+    monkeypatch.setattr(hub_client, "dispatch", _fake_dispatch)
+
+    result = await client.call_tool("dispatch_best", {
+        "site": "zhihu", "command": "hot",
+    })
+    # Should not raise; None last_seen sorts earlier than any datetime.
+    assert result.data["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# broadcast
+# ---------------------------------------------------------------------------
+
+async def test_broadcast_fans_out(client: Client, monkeypatch):
+    async def _fake_list():
+        return [
+            _make_node("alice", sites=["zhihu"]),
+            _make_node("bob", sites=["zhihu"]),
+        ]
+
+    async def _fake_dispatch(**kwargs: Any) -> HubTaskResult:
+        return _make_task(node_id=kwargs["node_id"], items=[{"nid": kwargs["node_id"]}])
+
+    monkeypatch.setattr(hub_client, "list_nodes", _fake_list)
+    monkeypatch.setattr(hub_client, "dispatch", _fake_dispatch)
+
+    result = await client.call_tool("broadcast", {
+        "site": "zhihu", "command": "hot",
+    })
+    data = result.data
+    assert data["total_nodes"] == 2
+    assert all(r["success"] for r in data["results"])
+
+
+async def test_broadcast_no_online_nodes(client: Client, monkeypatch):
+    async def _fake_list():
+        return [_make_node("alice", online=False, sites=["zhihu"])]
+
+    monkeypatch.setattr(hub_client, "list_nodes", _fake_list)
+    result = await client.call_tool("broadcast", {
+        "site": "zhihu", "command": "hot",
+    })
+    assert result.data["total_nodes"] == 0
+
+
+async def test_broadcast_partial_failure(client: Client, monkeypatch):
+    async def _fake_list():
+        return [
+            _make_node("alice", sites=["zhihu"]),
+            _make_node("bob", sites=["zhihu"]),
+        ]
+
+    async def _fake_dispatch(**kwargs: Any) -> HubTaskResult:
+        if kwargs["node_id"] == "alice":
+            return _make_task(node_id="alice", items=[{"x": 1}])
+        return _make_task(
+            node_id="bob", status="failed",
+            error_code="AUTH_REQUIRED", error_message="logged out",
+        )
+
+    monkeypatch.setattr(hub_client, "list_nodes", _fake_list)
+    monkeypatch.setattr(hub_client, "dispatch", _fake_dispatch)
+
+    result = await client.call_tool("broadcast", {
+        "site": "zhihu", "command": "hot",
+    })
+    data = result.data
+    results = {r["node_id"]: r for r in data["results"]}
+    assert results["alice"]["success"] is True
+    assert results["bob"]["success"] is False
+    assert results["bob"]["error_code"] == "AUTH_REQUIRED"
+
+
 # ---------------------------------------------------------------------------
 # get_task_status
 # ---------------------------------------------------------------------------
 
-@respx.mock
-async def test_get_task_status(client: Client):
-    respx.get(f"{BASE}/tasks/t99").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": {"id": "t99", "source_id": "src-1", "status": "completed"},
-        })
-    )
-    respx.get(f"{BASE}/records").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": [
-                {"id": "r1", "task_id": "t99", "raw_data": {"title": "full data"}, "status": "raw"},
-            ],
-        })
-    )
-    result = await client.call_tool("get_task_status", {"task_id": "t99"})
+async def test_get_task_status_completed(client: Client, monkeypatch):
+    async def _fake_get(task_id: str) -> HubTaskResult:
+        return _make_task(items=[])
+
+    async def _fake_records(task_id: str, limit: int = 500) -> HubRecordList:
+        return HubRecordList(
+            items=[{"title": "full x"}, {"title": "full y"}], total=2,
+        )
+
+    monkeypatch.setattr(hub_client, "get_task", _fake_get)
+    monkeypatch.setattr(hub_client, "get_task_records", _fake_records)
+
+    result = await client.call_tool("get_task_status", {"task_id": "task-x"})
     data = result.data
     assert data["status"] == "completed"
-    assert data["total_items"] == 1
-    assert data["items"][0]["title"] == "full data"
+    assert data["total_items"] == 2
 
 
-# ---------------------------------------------------------------------------
-# Output sanitization in dispatch
-# ---------------------------------------------------------------------------
+async def test_get_task_status_failed(client: Client, monkeypatch):
+    async def _fake_get(task_id: str) -> HubTaskResult:
+        return _make_task(
+            status="failed", items=[],
+            error_code="TIMEOUT", error_message="agent silent",
+        )
 
-@respx.mock
-async def test_dispatch_sanitizes_output(client: Client):
-    respx.get(f"{BASE}/sources").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": [{
-                "id": "src-x",
-                "name": "fleet:xiaohongshu:search",
-                "channel_type": "opencli",
-                "channel_config": {"site": "xiaohongshu", "command": "search"},
-                "enabled": True,
-            }],
-        })
-    )
-    respx.post(f"{BASE}/tasks/trigger").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": {"id": "t2", "source_id": "src-x", "status": "pending"},
-        })
-    )
-    respx.get(f"{BASE}/tasks/t2").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": {"id": "t2", "source_id": "src-x", "status": "completed"},
-        })
-    )
-    respx.get(f"{BASE}/records").mock(
-        return_value=Response(200, json={
-            "success": True,
-            "data": [{
-                "id": "r1",
-                "task_id": "t2",
-                "raw_data": {
-                    "title": "post",
-                    "cookie": "should-be-stripped",
-                    "session_token": "secret",
-                },
-                "status": "raw",
-            }],
-        })
-    )
+    monkeypatch.setattr(hub_client, "get_task", _fake_get)
 
-    result = await client.call_tool("dispatch", {
-        "node_id": "n1",
-        "site": "xiaohongshu",
-        "command": "search",
-        "args": {"q": "test"},
-    })
+    result = await client.call_tool("get_task_status", {"task_id": "task-x"})
     data = result.data
-    assert data["success"] is True
-    item = data["items"][0]
-    assert item["title"] == "post"
-    assert "cookie" not in item
-    assert "session_token" not in item
+    assert data["status"] == "failed"
+    assert data["error_code"] == "TIMEOUT"

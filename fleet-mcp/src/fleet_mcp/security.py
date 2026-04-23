@@ -37,7 +37,20 @@ SITE_DESCRIPTIONS: dict[str, str] = {
     "reddit": "Reddit — community forums",
 }
 
-FORBIDDEN_COMMANDS: set[str] = {"browser", "eval", "register", "exec", "shell"}
+FORBIDDEN_COMMANDS: set[str] = {
+    "browser",    # any browser.<sub> — `eval`/`click`/`type` can all inject or mutate
+    "eval",       # explicit JS exec in page context
+    "register",   # installs arbitrary external binaries
+    "install",    # auto-runs brew / apt to install packages
+    "plugin",     # installs GitHub packages as adapter plugins
+    "daemon",     # installs the bridge daemon as a system service
+    "adapter",    # adapter eject/reset/mutation
+    "synthesize", # writes adapter code from capture data
+    "generate",   # writes files from network captures
+    "record",     # cross-tab XHR/fetch injection recorder
+    "exec",       # generic exec
+    "shell",      # generic shell
+}
 
 
 def check_whitelist(site: str, command: str) -> str | None:

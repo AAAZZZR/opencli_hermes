@@ -1,0 +1,20 @@
+# Caddy config for fleet-hub.
+# Replace __PUBLIC_HOST__ with your sslip.io hostname, e.g. 34.46.31.68.sslip.io
+# Caddy will auto-get Let's Encrypt certs on first boot.
+
+__PUBLIC_HOST__ {
+    encode zstd gzip
+
+    # WebSocket upgrade for /api/v1/nodes/ws
+    reverse_proxy localhost:8031 {
+        header_up Host {upstream_hostport}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}
+
+# Redirect bare IP / anything else to the sslip hostname (optional, keeps URLs stable)
+:80, :443 {
+    redir https://__PUBLIC_HOST__{uri} permanent
+}

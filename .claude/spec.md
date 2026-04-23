@@ -1,50 +1,52 @@
-# Distributed OpenCLI Fleet — Development Spec
+# Distributed OpenCLI Fleet — Spec (rev. 2026-04-23)
 
-> A Hermes-orchestrated, multi-node OpenCLI collection system for personal use.
-> Cloud brain dispatches scraping tasks to a fleet of home laptops over reverse WebSocket.
+> Hermes-orchestrated, multi-node OpenCLI collection system for personal use.
+> Cloud brain dispatches scraping tasks to a fleet of home laptops over
+> reverse WebSocket.
+>
+> **Status:** Phase 1 implementation complete. All three packages
+> (fleet-mcp, fleet-hub, fleet-agent) live in this monorepo. 103 tests
+> passing.
 
 ---
 
-## 1. Project Overview
-
-### 1.1 What We're Building
+## 1. Overview
 
 A personal AI agent system where:
 
-- **One cloud VPS** runs a Hermes Agent as the "brain" — accepts natural language
-  requests ("fetch latest Xiaohongshu posts about X"), plans, dispatches, and
-  summarizes results.
-- **A fleet of home laptops** (MacBook / Win+WSL2 / Ubuntu) each run a thin
-  agent that executes `opencli` commands against their locally-logged-in
-  Chrome sessions, then stream results back.
-- **A thin MCP server** in the middle bridges Hermes ↔ existing
-  [opencli-admin](https://github.com/xjh1994/opencli-admin) infrastructure, so
-  Hermes can discover nodes, route commands, and retrieve results as MCP tools.
+- **One cloud VPS** runs a Hermes Agent as the "brain" — accepts natural
+  language requests ("fetch latest Xiaohongshu posts about X"), plans,
+  dispatches, summarizes.
+- **A fleet of home laptops** (macOS / Linux / WSL2) each run `fleet-agent`,
+  a thin Python process that executes `@jackwener/opencli` commands against
+  their locally-logged-in Chrome sessions, then streams results back over a
+  reverse WebSocket.
+- **`fleet-mcp`** is the MCP adapter Hermes loads as a tool provider. It
+  exposes 6 tools and forwards them to `fleet-hub` over localhost HTTP.
+- **`fleet-hub`** is the VPS-side central. FastAPI + SQLite + WS hub +
+  collection pipeline. **It is NOT a fork of `opencli-admin`** — we wrote
+  it from scratch to drop the features Hermes already covers.
 
-### 1.2 Why This Architecture
+### Why this architecture
 
 - **Login state stays at home** — sensitive cookies (Xiaohongshu, Weibo, X,
   Zhihu) never leave the laptop. VPS only sees normalized JSON output.
-- **Cloud brain, edge hands** — the LLM (expensive, centralized) runs in one
-  place; the browser automation (needs real login + residential IP) runs at
-  the edge.
-- **NAT-friendly** — laptops initiate outbound WSS to VPS, no port forwarding
-  or dynamic DNS required.
-- **Horizontally scalable** — adding a 6th laptop is one `curl | bash`.
+- **Cloud brain, edge hands** — the LLM runs in one place; the browser
+  automation runs at the edge, where residential IPs and real logins are.
+- **NAT-friendly** — laptops initiate outbound WSS to VPS, no port
+  forwarding or dynamic DNS required.
+- **Per-node tokens** — each laptop gets a unique registration token; the
+  hub refuses WS connections without one.
 
-### 1.3 Design Principles
+### Design principles
 
-1. **Reuse, don't rewrite.** opencli-admin already solved node registration,
-   WS hub, dispatch, and admin UI. We add a thin MCP layer on top; we do NOT
-   fork opencli-admin.
+1. **Replace, don't reuse.** We evaluated `xjh1994/opencli-admin` and
+   decided to rewrite. Hermes handles the AI / notification / provider
+   layers that `opencli-admin` includes, and we don't need its browser pool,
+   Web UI, or Celery. Our rewrite is smaller and shaped to our contract.
 2. **Hermes knows nothing about nodes directly.** It only sees MCP tools.
-   Swapping Hermes for Claude Code / another agent later changes nothing
-   downstream.
-3. **Security is non-negotiable.** Per-node tokens, command whitelist, audit
-   log, rate limits. A compromised VPS must NOT be able to weaponize the
-   laptops.
-4. **Ship a usable MVP first.** Phase 1 proves the loop end-to-end. Phase 2+
-   adds polish.
+   Swapping Hermes for another LLM agent later changes nothing downstream.
+3. **Ship usable first.** Phase 1 proves the end-to-end loop.
 
 ---
 
@@ -62,81 +64,58 @@ A personal AI agent system where:
 │   - interprets intent, plans, summarizes                            │
 │   - calls MCP tools on fleet-mcp                                    │
 └───────────────────────────────┬─────────────────────────────────────┘
-                                │ stdio MCP (same host)
+                                │ stdio MCP
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  VPS — fleet-mcp (our code, thin adapter)                           │
-│   Exposes tools:                                                    │
-│     • list_nodes()                                                  │
-│     • list_supported_sites()                                        │
-│     • dispatch(node_id, site, command, args)                        │
-│     • dispatch_best(site, command, args)                            │
-│     • broadcast(site, command, args)                                │
-│     • get_task_status(task_id)                                      │
-│   Calls opencli-admin REST API under the hood.                      │
-│   Enforces: command whitelist, rate limit, audit log.               │
+│  VPS — fleet-mcp (src/fleet_mcp)                                    │
+│   6 tools: list_nodes, list_supported_sites,                        │
+│            dispatch, dispatch_best, broadcast, get_task_status      │
+│   Enforces: whitelist, rate limit, audit log, output sanitization   │
 └───────────────────────────────┬─────────────────────────────────────┘
-                                │ HTTP (localhost)
+                                │ HTTP (localhost :8031)
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  VPS — opencli-admin (upstream, unmodified or minimally patched)    │
-│   - REST API  (:8031)                                               │
-│   - Web UI    (:8030)  ← human ops console                          │
-│   - WS Hub    (maintains reverse WSS to every laptop)               │
-│   - Scheduler (cron-style recurring collections)                    │
-│   - DB        (SQLite → Postgres later)                             │
+│  VPS — fleet-hub (src/fleet_hub)                                    │
+│   REST API:  POST /tasks, GET /nodes, GET /tasks/{id}/records …    │
+│   WS hub:    /api/v1/nodes/ws  (per-node token auth)                │
+│   DB:        SQLite (nodes / tasks / records), Record dedup         │
+│   Pipeline:  collect → normalize → store                            │
 └────────┬────────────┬────────────┬────────────┬────────────────────┘
          │ WSS        │ WSS        │ WSS        │ WSS
          │ reverse    │            │            │  (initiated by laptops)
   ┌──────▼─────┐ ┌────▼─────┐ ┌────▼─────┐ ┌────▼─────┐
-  │ MacBook    │ │ Win/WSL2 │ │ Ubuntu   │ │ ...      │
-  │ node-1     │ │ node-2   │ │ node-3   │ │          │
+  │ MacBook    │ │ Linux    │ │ WSL2     │ │ ...      │
+  │ fleet-agent│ │fleet-agen│ │fleet-agen│ │          │
   │ opencli    │ │ opencli  │ │ opencli  │ │          │
   │ Chrome ✓   │ │ Chrome ✓ │ │ Chrome ✓ │ │          │
-  │ logged in: │ │ logged:  │ │ logged:  │ │          │
-  │  XHS, Zhihu│ │  Weibo,X │ │  Reddit  │ │          │
   └────────────┘ └──────────┘ └──────────┘ └──────────┘
 ```
 
-### 2.1 Three Separate Deployments
-
-| Role | Machine | How Deployed | What's Installed |
-|------|---------|--------------|------------------|
-| **Central** | 1 × VPS | `docker compose up` | Hermes + fleet-mcp + opencli-admin API/UI |
-| **Node** | N × laptops | `curl ... \| bash` (script auto-generated by central) | agent_server.py + opencli + Chrome |
-| **Brain** | Same VPS as Central | `hermes` CLI + config | Hermes Agent binary |
-
-They are **fully independent installs**. The only link between them is that
-each node knows the central's public URL and authenticates with a
-per-node token.
-
-### 2.2 Request Flow (End-to-End)
+### 2.1 Request flow (end-to-end)
 
 ```
 User asks Hermes: "check Zhihu hot list"
   ↓
-Hermes LLM decides to call: dispatch_best(site="zhihu", command="hot")
+Hermes LLM calls MCP tool: dispatch_best(site="zhihu", command="hot")
   ↓
-fleet-mcp receives MCP tool call
+fleet-mcp checks whitelist + rate limit + audit-logs the call
   ↓
-fleet-mcp checks: is (zhihu, hot) in whitelist? is rate limit ok?
+fleet-mcp: GET /nodes → picks an online node that's logged in to zhihu (LRU)
   ↓
-fleet-mcp POSTs to http://localhost:8031/api/v1/collect (opencli-admin)
+fleet-mcp: POST /tasks {node_id:"alice", site:"zhihu", command:"hot", wait:true}
   ↓
-opencli-admin picks a node (priority: manual > schedule > site-binding > free)
+fleet-hub creates task row, sends WS frame to the node, awaits result
   ↓
-opencli-admin pushes WS message to selected laptop:
-  {"type":"collect", "request_id":"...", "site":"zhihu", "command":"hot"}
-  ↓
-Laptop's agent_server runs: opencli zhihu hot -f json
+fleet-agent runs: opencli zhihu hot --format json
   ↓
 opencli uses local Chrome (logged in) to scrape, returns JSON
   ↓
-Laptop WS-sends result back to central
+fleet-agent sends {type:"result", items:[...], success:true} back over WS
   ↓
-Central resolves the Future, returns JSON to fleet-mcp
+fleet-hub's pipeline normalizes → dedups → stores records, returns TaskResult
   ↓
-fleet-mcp returns MCP tool result to Hermes
+fleet-mcp sanitizes (strips cookie/session fields), truncates to 50 items,
+  returns DispatchResult to Hermes
   ↓
 Hermes summarizes with LLM → replies to user
 ```
@@ -145,519 +124,487 @@ Typical round-trip: 5–30 seconds depending on command.
 
 ---
 
-## 3. Components
+## 3. Components (monorepo layout)
 
-### 3.1 opencli-admin (Upstream Dependency)
+```
+opencli_agent/
+├── fleet-mcp/           # MCP adapter for Hermes (Python)
+├── fleet-hub/           # VPS central (FastAPI + SQLite)
+├── fleet-agent/         # Laptop-side runner (Python WS client + subprocess)
+├── docs/                # Hermes config examples, deployment notes
+└── .claude/             # spec.md (this file) + feature-audit.md
+```
 
-- **Repo:** https://github.com/xjh1994/opencli-admin
-- **Role:** Node management + WS hub + scheduler + web UI
-- **Modification policy:** Pin to a specific tag; avoid forking if possible.
-  If changes are required, maintain a minimal patch set in `patches/`.
-- **Key endpoints we'll call from fleet-mcp:**
-  - `GET /api/v1/nodes` — list nodes
-  - `POST /api/v1/data-sources` — create/trigger collection
-  - `POST /api/v1/tasks/trigger` — manual dispatch
-  - `GET /api/v1/tasks/{id}` — poll task status
-  - `GET /api/v1/records` — fetch collected records
-
-### 3.2 fleet-mcp (Our Code, Primary Deliverable)
+### 3.1 fleet-mcp
 
 - **Language:** Python 3.11+
-- **Framework:** [FastMCP](https://github.com/jlowin/fastmcp) v3+
+- **Framework:** FastMCP v3+
 - **Transport:** stdio (launched by Hermes as subprocess)
-- **Lines of code target:** < 800 total
-- **Repo structure:**
+- **Enforces:** command whitelist, per-node + global rate limit, audit log,
+  output sanitization, item-count truncation
+- **Key files:** `src/fleet_mcp/{server.py, hub_client.py, security.py, schemas.py, config.py}`
 
-```
-fleet-mcp/
-├── pyproject.toml
-├── README.md
-├── .env.example
-├── src/
-│   └── fleet_mcp/
-│       ├── __init__.py
-│       ├── __main__.py          # entrypoint: python -m fleet_mcp
-│       ├── server.py            # FastMCP server + tool definitions
-│       ├── admin_client.py      # httpx client for opencli-admin REST API
-│       ├── security.py          # command whitelist, rate limiter, audit log
-│       ├── config.py            # pydantic-settings config loader
-│       └── schemas.py           # pydantic models for tool inputs/outputs
-└── tests/
-    ├── test_admin_client.py
-    ├── test_security.py
-    └── test_server.py           # use FastMCP's in-memory test client
-```
+### 3.2 fleet-hub
 
-### 3.3 Node Agents
+- **Language:** Python 3.11+
+- **Framework:** FastAPI + SQLAlchemy 2.0 (async) + aiosqlite
+- **Data model:** Node, Task, Record (see `src/fleet_hub/models.py`)
+- **WS protocol:** documented in §4.2
+- **REST endpoints:** documented in §4.1
+- **Pipeline:** `src/fleet_hub/pipeline/{normalize,store}.py` — field-alias
+  normalization, content-hash dedup per-task, recursive sanitization of
+  sensitive fields
 
-- **Source:** opencli-admin's `backend/agent_server.py` (unmodified for MVP)
-- **Install:** Auto-generated shell script from `GET /api/v1/nodes/install/agent.sh`
-- **Enhancement (Phase 2):** Add `detect_logged_in_sites()` at startup and
-  report capabilities in the WS register message.
+### 3.3 fleet-agent
+
+- **Language:** Python 3.11+
+- **Install:** via curl-piped installer served by fleet-hub (see §7.2)
+- **Runs:** `@jackwener/opencli` (pinned by hub config to a npm spec —
+  currently `@jackwener/opencli@latest`; pin to a version in production)
+- **Auto-reconnects** with exponential backoff (default 3s → 60s)
+- **Detects logged-in sites** at handshake time via cheap probes
+  (`opencli <site> hot --limit 1 --format json`)
 
 ---
 
-## 4. MCP Tool Specification
+## 4. Interfaces
 
-The core interface between Hermes and everything downstream.
+### 4.1 fleet-hub REST API (used by fleet-mcp)
 
-### 4.1 `list_nodes()`
+Base path: `/api/v1`. No auth in front of REST — fleet-mcp only talks to it
+over `http://localhost:8031` on the VPS. Expose through a reverse proxy
+with auth if you ever publish it.
 
-**Purpose:** Show Hermes which laptops are online and what sites they can
-scrape.
+```
+GET    /health                      → {status, version}
+GET    /api/v1/nodes                → [NodeOut, ...]
+POST   /api/v1/nodes                → {NodeCreated with token}
+GET    /api/v1/nodes/{id|label}     → NodeOut
+DELETE /api/v1/nodes/{id|label}     → 204
+WS     /api/v1/nodes/ws             → agent endpoint (see §4.2)
+GET    /api/v1/nodes/install/agent.sh?label=<label>
+                                    → rendered bash installer
 
-**Input:** none
+POST   /api/v1/tasks                → TaskResult
+GET    /api/v1/tasks                → [TaskOut, ...]  (?node_id=, ?site=, ?status=)
+GET    /api/v1/tasks/{id}           → TaskOut
+GET    /api/v1/tasks/{id}/records   → {items:[...], total}
+```
 
-**Output:**
+`POST /tasks` is the primary dispatch call:
+
 ```json
+request:
 {
-  "nodes": [
-    {
-      "node_id": "alice-mbp",
-      "label": "Alice's MacBook",
-      "online": true,
-      "last_seen": "2026-04-23T10:15:00Z",
-      "logged_in_sites": ["xiaohongshu", "zhihu", "bilibili"],
-      "chrome_mode": "cdp"
-    }
-  ]
+  "node_id": "alice-mbp",       // label or UUID
+  "site": "zhihu",
+  "command": "hot",
+  "args": {"limit": 10},
+  "positional_args": [],
+  "format": "json",
+  "timeout_sec": 120,
+  "wait": true
+}
+
+response (wait=true, success):
+{
+  "id": "<uuid>",
+  "node_id": "<node uuid>",
+  "site": "zhihu", "command": "hot", ...
+  "status": "completed",
+  "items_total": 10, "items_stored": 10,
+  "duration_ms": 4521,
+  "items": [{...}, ...]
+}
+
+response (wait=true, failure):
+{
+  ...
+  "status": "failed",
+  "error_code": "AUTH_REQUIRED",
+  "error_message": "Zhihu logged out",
+  "exit_code": 77,
+  "items": []
 }
 ```
 
-### 4.2 `list_supported_sites()`
+### 4.2 WebSocket protocol (hub ↔ agent)
 
-**Purpose:** Tell Hermes which (site, command) pairs are whitelisted.
+Endpoint: `wss://<central>/api/v1/nodes/ws`.
 
-**Input:** none
+**Handshake** — agent sends first:
 
-**Output:**
 ```json
 {
-  "sites": [
-    {
-      "site": "xiaohongshu",
-      "commands": ["search", "note", "feed", "user"],
-      "description": "Xiaohongshu (RedNote) — search and read posts"
-    },
-    {
-      "site": "zhihu",
-      "commands": ["hot", "search", "question"],
-      "description": "Zhihu — Chinese Q&A platform"
-    }
-  ]
+  "type": "register",
+  "token": "<node token>",
+  "mode": "bridge",              // bridge | cdp
+  "os": "darwin",                // darwin | linux | win
+  "logged_in_sites": ["zhihu", "xiaohongshu"],
+  "opencli_version": "1.7.7"
 }
 ```
 
-Built from `SUPPORTED_SITES` constant in `security.py`.
+Hub validates the token against the DB. On success:
 
-### 4.3 `dispatch(node_id, site, command, args)`
+```json
+{"type": "registered", "node_id": "<uuid>", "label": "<label>"}
+```
 
-**Purpose:** Run an opencli command on a specific node.
+Invalid token → WS close with code 4001.
+Invalid frame → WS close with code 4002.
+Connection replaced by a newer one → old closed with code 4000.
 
-**Input:**
+**Dispatch** — hub → agent:
+
 ```json
 {
-  "node_id": "alice-mbp",
-  "site": "xiaohongshu",
-  "command": "search",
-  "args": {"q": "AI agents", "limit": 20},
-  "format": "json"
+  "type": "collect",
+  "task_id": "<uuid>",
+  "site": "zhihu",
+  "command": "hot",
+  "args": {"limit": 10},
+  "positional_args": [],
+  "format": "json",
+  "timeout": 120
 }
 ```
 
-**Output:**
+**Result** — agent → hub:
+
 ```json
 {
+  "type": "result",
+  "task_id": "<uuid>",
   "success": true,
-  "node_id": "alice-mbp",
-  "task_id": "uuid-...",
-  "items": [ /* up to 50, truncated if more */ ],
-  "truncated": false,
-  "total_items": 20,
+  "items": [{...}, ...],
+  "exit_code": 0,
   "duration_ms": 4521
 }
 ```
 
-**Behavior:**
-- Checks whitelist → returns error if `(site, command)` not allowed.
-- Checks rate limit → returns error if exceeded.
-- Writes audit log entry.
-- Calls opencli-admin, awaits result, normalizes response.
-- **Truncates items if > 50** to protect Hermes' context window. Full data
-  stays in opencli-admin DB; client can query via `get_task_status`.
+On failure:
 
-### 4.4 `dispatch_best(site, command, args)`
-
-**Purpose:** Auto-select the best node for a site (one logged in to that site).
-
-**Input:** same as `dispatch()` but no `node_id`.
-
-**Output:** same as `dispatch()`.
-
-**Node selection logic:**
-1. Online nodes with `site` in their `logged_in_sites`
-2. If multiple → least recently used
-3. If none → return error suggesting which nodes need to log in
-
-### 4.5 `broadcast(site, command, args)`
-
-**Purpose:** Run on **all** nodes logged in to `site`, e.g. multi-account
-data collection.
-
-**Input:** same as `dispatch_best()`.
-
-**Output:**
 ```json
 {
-  "total_nodes": 3,
-  "results": [
-    {"node_id": "alice-mbp", "success": true, "items": [...]},
-    {"node_id": "bob-win",   "success": true, "items": [...]},
-    {"node_id": "home-nuc",  "success": false, "error": "timeout"}
-  ]
+  "type": "result",
+  "task_id": "<uuid>",
+  "success": false,
+  "items": [],
+  "error": {
+    "code": "AUTH_REQUIRED",
+    "message": "Zhihu logged out",
+    "exit_code": 77,
+    "stderr": "..."
+  }
 }
 ```
 
-Uses `asyncio.gather` with per-node timeout. Does not fail the whole call if
-one node errors.
+`exit_code` taxonomy follows OpenCLI's `src/errors.ts`:
+`0 ok / 1 generic / 2 usage / 66 empty / 69 service / 75 timeout / 77 auth / 78 config`.
 
-### 4.6 `get_task_status(task_id)`
+**Keepalive** — either side can send `{"type": "ping"}` at any time; the
+other replies `{"type": "pong"}`. The underlying websockets library also
+runs its own ping frames (`ping_interval=30s`, `ping_timeout=10s` by
+default — configurable via agent env).
 
-**Purpose:** Retrieve the full, untruncated result of a previous dispatch.
+### 4.3 MCP tool specification (Hermes-facing)
 
-**Input:** `{"task_id": "uuid-..."}`
+All 6 tools live in `fleet_mcp/server.py`. Brief summary — see that file
+for the full signatures:
 
-**Output:** full item array from opencli-admin DB.
+| Tool | Purpose |
+|------|---------|
+| `list_nodes()` | Which laptops are online, what sites each is logged into |
+| `list_supported_sites()` | Whitelisted (site, command) pairs |
+| `dispatch(node_id, site, command, args, positional_args)` | Run on a specific node |
+| `dispatch_best(site, command, args, positional_args)` | Auto-pick an LRU online node logged in to the site |
+| `broadcast(site, command, args, positional_args)` | Fan-out to every online node logged in to the site |
+| `get_task_status(task_id)` | Retrieve full untruncated records for a prior task |
+
+Items are truncated to `MAX_ITEMS_INLINE=50` in tool responses to protect
+Hermes' context. Full records are always retrievable via `get_task_status`.
 
 ---
 
 ## 5. Security
 
-**These are not optional.** Ship all six in Phase 1.
+### 5.1 Per-node tokens (implemented)
 
-### 5.1 Per-Node Tokens
+- Every node has a `token` column on the `nodes` table, generated via
+  `secrets.token_urlsafe(32)` when the admin calls `POST /api/v1/nodes`.
+- Token is included in the WS register frame; hub validates by DB lookup.
+- Revoking a node: `DELETE /api/v1/nodes/{label}`. The active WS is
+  force-closed and the row is removed — other nodes unaffected.
 
-- Each node gets a unique token (generated in admin DB when you add a node).
-- Node sends `{"type":"register", "node_id":"...", "token":"..."}` on WS
-  connect.
-- Central verifies; rejects with WS close code 4001 if invalid.
-- Revoking one node: delete its row in DB. Other nodes unaffected.
+### 5.2 Command whitelist (fleet-mcp only)
 
-### 5.2 Command Whitelist
-
-- Hardcoded in `fleet_mcp/security.py`:
+Defined in `fleet_mcp/security.py::SUPPORTED_SITES`. Default set:
 
 ```python
-SUPPORTED_SITES: dict[str, set[str]] = {
+SUPPORTED_SITES = {
     "xiaohongshu": {"search", "note", "feed", "user"},
     "zhihu":       {"hot", "search", "question"},
     "bilibili":    {"hot", "search", "ranking"},
     "weibo":       {"hot", "search"},
     "twitter":     {"search", "timeline", "profile"},
     "reddit":      {"hot", "subreddit", "search"},
-    # add new ones here as you need them
 }
 
-# Explicitly forbidden regardless of site:
-FORBIDDEN_COMMANDS: set[str] = {"browser", "eval", "register", "exec", "shell"}
+FORBIDDEN_COMMANDS = {
+    "browser", "eval", "register", "install", "plugin", "daemon",
+    "adapter", "synthesize", "generate", "record", "exec", "shell",
+}
 ```
 
-- `browser.eval` can inject arbitrary JS — **never** expose it.
-- `register` lets opencli run arbitrary local CLIs — **never** expose it.
+- `browser`, `eval` — JS injection / page mutation
+- `register`, `install`, `plugin` — install arbitrary CLIs / npm packages
+- `daemon`, `adapter`, `synthesize`, `generate`, `record` — write/mutate
+  adapter state or capture cross-tab XHRs
 
-### 5.3 Rate Limiting
+Per-site-per-command allowlist is the model; expand `SUPPORTED_SITES` when
+you want new capabilities.
 
-- Token bucket per node: 10 requests/minute, burst 3.
-- Global: 60 requests/minute.
-- Implemented with `limits` library or simple in-memory counter.
-- Exceeding returns error, doesn't queue. Hermes retries via its own logic.
+### 5.3 Rate limiting (fleet-mcp)
 
-### 5.4 Audit Log
+Token bucket, in-memory:
+- Per-node: 10/min, burst 3
+- Global: 60/min, burst `max(3, rpm/10)`
 
-- Every tool call logged to `~/.fleet-mcp/audit.log` (JSONL):
+Exceeding returns an error; does not queue. Hermes retries via its own
+logic.
 
-```json
-{"ts":"2026-04-23T10:15:00Z","tool":"dispatch","node_id":"alice-mbp",
- "site":"xiaohongshu","command":"search","args_hash":"sha256:...",
- "result":"ok","duration_ms":4521,"items_count":20}
-```
+### 5.4 Audit log (fleet-mcp + fleet-hub)
 
-- Never log raw args (may contain personal search terms) — hash them.
-- Rotate daily, keep 30 days.
+fleet-mcp: `~/.fleet-mcp/audit.log` (JSONL). Every tool call, with hashed
+args (not raw — may contain search terms).
 
-### 5.5 Output Sanitization
+fleet-hub: `~/.fleet-hub/audit.log`. WS connects/disconnects, node
+create/delete, task create/complete/fail.
 
-- Before returning to Hermes, strip fields: `cookie`, `session`, `token`,
-  `x-csrf-token`, `authorization`, any field matching `/(api|access|secret)_?key/i`.
-- Implement as a recursive dict walker in `security.py`.
+### 5.5 Output sanitization
 
-### 5.6 TLS Everywhere
+Both fleet-mcp and fleet-hub strip fields whose names match
+`cookie|session|token|x-csrf-token|authorization|(api|access|secret)_key`
+recursively before anything touches durable storage or crosses to Hermes.
 
-- Central → public internet: Caddy auto-TLS with Let's Encrypt.
-- Node → Central: `wss://`, reject plain `ws://` in config loader.
-- fleet-mcp ↔ opencli-admin: localhost-only (`http://localhost:8031`), never
-  exposed.
+### 5.6 TLS
+
+- Central ↔ public internet: put Caddy in front of fleet-hub, auto-TLS
+  via Let's Encrypt. Configure `PUBLIC_URL` to the `https://` endpoint so
+  the install script tells nodes `wss://`.
+- Node ↔ central: agent derives `wss://` or `ws://` from the
+  `CENTRAL_URL` — use `https://` in production.
+- fleet-mcp ↔ fleet-hub: localhost-only, `http://`.
 
 ---
 
 ## 6. Configuration
 
-### 6.1 fleet-mcp Config
-
-`.env` file, loaded by pydantic-settings:
+### 6.1 fleet-mcp (`.env`)
 
 ```bash
-# opencli-admin backend (always localhost)
-ADMIN_API_URL=http://localhost:8031
-ADMIN_API_KEY=                    # if admin gets auth added
-
-# Security
-RATE_LIMIT_PER_NODE=10            # per minute
-RATE_LIMIT_GLOBAL=60              # per minute
+HUB_URL=http://localhost:8031
+RATE_LIMIT_PER_NODE=10
+RATE_LIMIT_GLOBAL=60
 AUDIT_LOG_PATH=~/.fleet-mcp/audit.log
-MAX_ITEMS_INLINE=50               # truncate above this
-
-# Timeouts
+MAX_ITEMS_INLINE=50
 TASK_TIMEOUT_SEC=120
 BROADCAST_TIMEOUT_SEC=180
-
-# Logging
 LOG_LEVEL=INFO
 ```
 
-### 6.2 Hermes Config
+### 6.2 fleet-hub (`.env`)
 
-Add to `~/.hermes/config.yaml`:
+```bash
+HOST=0.0.0.0
+PORT=8031
 
-```yaml
-mcp_servers:
-  fleet:
-    command: "python"
-    args: ["-m", "fleet_mcp"]
-    env:
-      ADMIN_API_URL: "http://localhost:8031"
-    tools:
-      include:
-        - list_nodes
-        - list_supported_sites
-        - dispatch
-        - dispatch_best
-        - broadcast
-        - get_task_status
-    connect_timeout: 30
-    timeout: 180
+DATABASE_URL=sqlite+aiosqlite:///./fleet_hub.db
+NODE_TOKEN_BYTES=32
+AUDIT_LOG_PATH=~/.fleet-hub/audit.log
+
+DEFAULT_TASK_TIMEOUT_SEC=120
+MAX_TASK_TIMEOUT_SEC=600
+WS_PING_INTERVAL_SEC=30
+WS_PING_TIMEOUT_SEC=10
+NODE_OFFLINE_AFTER_SEC=60
+
+PUBLIC_URL=https://fleet.yourdomain.com
+OPENCLI_NPM_SPEC=@jackwener/opencli@latest
+FLEET_AGENT_INSTALL_SPEC=git+https://github.com/YOUR_ORG/opencli_agent.git#subdirectory=fleet-agent
+
+LOG_LEVEL=INFO
 ```
+
+### 6.3 fleet-agent (`~/.fleet-agent/config.env`, written by installer)
+
+```bash
+CENTRAL_URL=https://fleet.yourdomain.com
+NODE_TOKEN=<generated at POST /api/v1/nodes>
+NODE_LABEL=alice-mbp
+OPENCLI_BIN=/usr/local/bin/opencli
+AGENT_MODE=bridge
+LOG_LEVEL=INFO
+```
+
+### 6.4 Hermes (`~/.hermes/config.yaml`)
+
+See `docs/hermes-config.yaml` in the repo.
 
 ---
 
 ## 7. Deployment
 
-### 7.1 VPS Setup (one-time)
+### 7.1 VPS setup (one-time)
 
 ```bash
-# 1. Install Docker, Caddy (for TLS), uv (for Python)
-# Standard Ubuntu/Debian setup — not covered here
+# Deps: python >= 3.11, uv or pip, caddy (or any TLS reverse proxy), hermes
 
-# 2. Clone opencli-admin
-git clone https://github.com/xjh1994/opencli-admin.git
-cd opencli-admin
-cp .env.example .env
+# 1. Clone the monorepo
+git clone https://github.com/YOUR_ORG/opencli_agent.git
+cd opencli_agent
 
-# Edit .env — critical changes:
-#   COLLECTION_MODE=agent              (not "local")
-#   PUBLIC_URL=https://fleet.yourdomain.com
-#   SECRET_KEY=<openssl rand -hex 32>
+# 2. Install fleet-hub and fleet-mcp
+(cd fleet-hub && uv venv .venv && uv pip install -e .)
+(cd fleet-mcp && uv venv .venv && uv pip install -e .)
 
-# 3. Start central services (skip the built-in agent-1 — we don't need it)
-docker compose up -d api frontend
+# 3. Configure
+cp fleet-hub/.env.example fleet-hub/.env
+# Edit: set PUBLIC_URL to your https domain, FLEET_AGENT_INSTALL_SPEC to
+# point at a git URL/branch your laptops can reach.
 
-# 4. Install Hermes
-curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
-hermes setup  # pick your model provider, skip gateway for now
+cp fleet-mcp/.env.example fleet-mcp/.env
 
-# 5. Install fleet-mcp
-git clone https://github.com/you/fleet-mcp.git
-cd fleet-mcp
-uv pip install -e .
-cp .env.example .env  # defaults are usually fine on VPS
+# 4. Run fleet-hub (e.g. via systemd, see docs/)
+cd fleet-hub && .venv/bin/python -m fleet_hub
 
-# 6. Add fleet MCP server to Hermes config (see section 6.2)
-vim ~/.hermes/config.yaml
+# 5. Configure Hermes to launch fleet-mcp via stdio
+vim ~/.hermes/config.yaml   # see docs/hermes-config.yaml
 
-# 7. Configure Caddy for TLS
-cat > /etc/caddy/Caddyfile <<EOF
-fleet.yourdomain.com {
-    reverse_proxy localhost:8031
-}
-admin.yourdomain.com {
-    reverse_proxy localhost:8030
-    basicauth * {
-        admin <bcrypt-hash>
-    }
-}
-EOF
-systemctl reload caddy
+# 6. Caddyfile:
+#   fleet.yourdomain.com {
+#     reverse_proxy localhost:8031
+#   }
+```
 
-# 8. Test
+### 7.2 Adding a node (per laptop)
+
+```bash
+# On VPS:
+curl -X POST http://localhost:8031/api/v1/nodes -H "content-type: application/json" \
+  -d '{"label":"alice-mbp"}'
+# → {"id":"...","label":"alice-mbp","token":"...","status":"offline", ...}
+
+# Copy the URL onto the laptop:
+#   curl -fsSL "https://fleet.yourdomain.com/api/v1/nodes/install/agent.sh?label=alice-mbp" | bash
+
+# The installer (see fleet-hub/scripts/install-agent.sh) will:
+#   - verify python >= 3.11 and node >= 21
+#   - npm install -g @jackwener/opencli@latest
+#   - create venv at ~/.fleet-agent/venv
+#   - pip install fleet-agent from FLEET_AGENT_INSTALL_SPEC
+#   - write ~/.fleet-agent/config.env (with token + central URL)
+#   - install a launchd plist (macOS) or systemd --user unit (Linux/WSL)
+#   - start the service
+
+# Verify
 hermes
 > list my nodes
-# → should return empty list (no nodes registered yet)
+# → includes alice-mbp as online
 ```
 
-### 7.2 Adding a Node (repeat per laptop)
+### 7.3 Logging into sites (per site per node)
 
 ```bash
-# On VPS: go to Web UI → Node Management → Add Node
-# Copy the generated curl command (it has CENTRAL_API_URL pre-filled)
-
-# On laptop (Mac / Win WSL2 / Ubuntu):
-curl -fsSL https://fleet.yourdomain.com/api/v1/nodes/install/agent.sh \
-  | AGENT_REGISTER=ws bash
-
-# 驗證
-# On VPS: Web UI → Node Management → should show new node with green dot
-# Or via Hermes:
-hermes
-> list my nodes
-# → should include the new one
-```
-
-### 7.3 Logging Into Sites (one-time per site per node)
-
-```bash
-# On laptop:
-# If using Docker install (default):
-docker exec -it opencli-agent bash
-# Chrome is headless inside the container — use noVNC if you enabled it
-# Or if you're using native install (not Docker), just open the Chrome window
-
-# Navigate to the site, log in normally. Cookies persist in the profile.
-# Examples:
-#   https://www.xiaohongshu.com  (sms/qr login)
-#   https://www.zhihu.com
-#   https://twitter.com
-```
-
-### 7.4 Updating the Fleet
-
-```bash
-# Central (VPS):
-cd opencli-admin && git pull && docker compose pull && docker compose up -d
-cd ../fleet-mcp && git pull && uv pip install -e .
-
-# Nodes (each laptop):
-# Re-run the install script — it's idempotent and pulls the latest image.
-curl -fsSL https://fleet.yourdomain.com/api/v1/nodes/install/agent.sh | bash
+# On the laptop — normal Chrome login to each target site.
+#   https://www.xiaohongshu.com/
+#   https://www.zhihu.com/
+#   https://twitter.com/ ...
+# opencli's Bridge mode reuses the user's main Chrome profile.
+# At the next fleet-agent register (or service restart), logged_in_sites
+# will be auto-detected.
 ```
 
 ---
 
-## 8. Development Roadmap
+## 8. Development roadmap
 
-### Phase 1 — MVP (target: 1 week)
+### Phase 1 — MVP  ✓ DONE (this rev)
 
-**Goal:** End-to-end loop working with 2 nodes.
+- [x] Scaffold fleet-mcp, fleet-hub, fleet-agent
+- [x] Hub REST + WS + pipeline
+- [x] Agent WS client + subprocess runner + login probe
+- [x] fleet-mcp with 6 tools, whitelist, rate limit, audit, sanitize
+- [x] Full test suites (103 tests green)
+- [x] Install script for agent deployment
+- [ ] End-to-end smoke test on real hardware (2+ laptops + VPS)
 
-- [ ] Scaffold `fleet-mcp` repo with FastMCP skeleton
-- [ ] Implement `admin_client.py` — httpx wrapper over opencli-admin REST API
-- [ ] Implement all 6 MCP tools (sections 4.1–4.6)
-- [ ] Implement `security.py` — whitelist, rate limit, audit log, sanitization
-- [ ] Write tests with FastMCP in-memory client + mocked admin
-- [ ] Deploy to VPS, register 2 nodes (one Mac, one WSL2)
-- [ ] Manually log in to Xiaohongshu + Zhihu on each
-- [ ] Ask Hermes: "what are the hot topics on Zhihu?" → get real results
+### Phase 2 — Production polish
 
-### Phase 2 — Production Polish (target: +1 week)
+- [ ] Systemd units for fleet-hub and fleet-mcp on VPS (docs only needed)
+- [ ] Alembic migrations (currently: `Base.metadata.create_all` at startup)
+- [ ] Hub: webhook trigger for external systems (e.g. Hermes cron)
+- [ ] Better per-site auth-check — propose `opencli auth-check <site>`
+      upstream to avoid running real commands just to detect logout
+- [ ] Runbook: Chrome session expiry, opencli version bumps, node
+      offline > N hours
 
-- [ ] Node capability auto-detection — agent reports `logged_in_sites` at
-      WS handshake (requires minor patch to `agent_server.py`)
-- [ ] Hermes skill file (`~/.hermes/skills/fleet.md`) with best-practice prompts
-      for the tools
-- [ ] Basic monitoring: fleet-mcp exposes `/health` and Prometheus metrics
-- [ ] Systemd service files for fleet-mcp on VPS
-- [ ] Runbook: what to do when a node goes offline, when Chrome session expires,
-      when opencli-admin gets out-of-sync
+### Phase 3 — Nice-to-have
 
-### Phase 3 — Nice-to-Have (no target)
-
-- [ ] Scheduled collections driven by Hermes cron (e.g. "every morning,
-      check X, Y, Z and email me a summary")
-- [ ] Multi-account support per site per node (different Chrome profiles)
-- [ ] Auto-generation of new opencli adapters for sites not yet supported
-      (via `opencli explore` + `synthesize`)
-- [ ] Add non-opencli channels: arbitrary RSS, direct API, etc. (opencli-admin
-      already supports these — just expose via MCP)
+- [ ] Scheduled collections (cron-like) — add a scheduler to fleet-hub
+- [ ] Multi-account per site per node (different Chrome profiles)
+- [ ] Non-opencli channels: RSS, direct API (follow opencli-admin's
+      channel registry pattern)
+- [ ] Web UI (if CLI via Hermes ever isn't enough)
 
 ---
 
-## 9. Testing Strategy
+## 9. Testing strategy
 
-### 9.1 Unit Tests
+Each package has its own pytest suite; all run in < 5s on 2026 hardware.
 
-Each module has isolated tests. Target: **80% line coverage on fleet-mcp**.
+- **fleet-mcp** (44 tests): whitelist, rate limit, audit, sanitizer,
+  hub_client (respx-mocked HTTP), all 6 MCP tools (FastMCP in-memory
+  client), LRU tie-break behavior
+- **fleet-hub** (35 tests): REST CRUD for nodes, task dispatch with a
+  stubbed WSManager, pipeline unit tests (normalize/hash/store/dedup), WS
+  manager future plumbing
+- **fleet-agent** (24 tests): `build_argv` edge cases, subprocess runner
+  with a fake `asyncio.Process`, error envelope preference, timeout kill,
+  login probe logic, **end-to-end WS roundtrip** with an in-process fake
+  hub (websockets.serve)
 
-- `test_admin_client.py` — mock httpx, verify correct URL construction
-- `test_security.py` — whitelist decisions, rate limit edge cases,
-  sanitization with nested dicts
-- `test_server.py` — use `fastmcp.Client` with in-memory transport:
+Manual smoke test after any deploy:
 
-```python
-from fastmcp import Client
-from fleet_mcp.server import mcp
-
-async def test_dispatch_rejects_unknown_site():
-    async with Client(mcp) as client:
-        result = await client.call_tool("dispatch", {
-            "node_id": "test",
-            "site": "unknown_site",
-            "command": "search",
-            "args": {}
-        })
-        assert result["success"] is False
-        assert "not allowed" in result["error"]
-```
-
-### 9.2 Integration Tests
-
-`tests/integration/` — requires a running opencli-admin (Docker).
-
-- `test_full_loop.py` — spin up admin in ephemeral container, register a
-  mock WS agent, call fleet-mcp tools, verify round-trip.
-
-### 9.3 Manual Smoke Test
-
-After every deploy:
-
-1. `hermes` → `list my nodes` → expect ≥ 2 online
-2. `hermes` → `dispatch to <node> zhihu hot` → expect ≥ 10 items
-3. Pull the plug on a node → re-run step 1 → expect that node offline within 60s
-4. Check `~/.fleet-mcp/audit.log` — both calls logged, no tokens leaked
+1. `hermes` → "list my nodes" → expect ≥ 1 online
+2. `hermes` → "fetch zhihu hot list" → expect ≥ 10 items
+3. Pull the plug on a node → re-run step 1 → node offline within 60s
+4. Check `~/.fleet-hub/audit.log` — both calls logged
 
 ---
 
-## 10. Open Questions / Decisions Needed
+## 10. Decisions made, open questions
 
-- [ ] **Which model for Hermes?** Claude Sonnet 4.6 via API? OpenRouter for
-      cheaper fallback? Decide based on expected volume.
-- [ ] **Authentication for opencli-admin REST API.** Currently no auth.
-      Options: (a) bind to localhost only (simplest, assumes VPS is trusted),
-      (b) add basic auth, (c) add API key middleware. Start with (a).
-- [ ] **Where to store per-node tokens?** opencli-admin doesn't have this
-      natively. Either: patch admin to add a `token` column on `EdgeNode`,
-      or put it in fleet-mcp's own SQLite side-DB. Decide in Phase 1.
-- [ ] **Chrome session expiry.** Xiaohongshu logs out after ~30 days.
-      Need a runbook + possibly a `/diagnose` tool that detects this.
-- [ ] **Logging destination.** Stick with local audit.log, or ship to
-      Grafana Loki? Start local, revisit if fleet grows beyond 10 nodes.
+| Question | Decision / status |
+|----------|-------------------|
+| Reuse `opencli-admin` or rewrite? | **Rewrite** — smaller, simpler, ours. See feature-audit.md. |
+| Per-node tokens — where stored? | First-class column on `nodes` table in fleet-hub DB. |
+| REST auth on fleet-hub? | localhost-only from fleet-mcp, no REST auth; reverse proxy with basic auth if you ever expose it. |
+| Bridge vs CDP mode? | Default `bridge` (opencli's default; handles extension lifecycle). Settable in agent config. |
+| OpenCLI version pin? | **`@jackwener/opencli@latest`** for personal use. Pin to a specific version in production-ish setups. Updated via re-running the installer. |
+| LOC cap? | **No cap.** The spec's old "< 800 LOC" targets are void. |
+| Schema migrations? | None yet (sqlite + create_all). Add Alembic if schema starts drifting. |
+| Chrome session expiry runbook? | Future work. |
 
 ---
 
 ## 11. References
 
-- **opencli-admin** — https://github.com/xjh1994/opencli-admin
-- **OpenCLI** — https://github.com/jackwener/OpenCLI
-- **Hermes Agent docs** — https://hermes-agent.nousresearch.com/docs
-- **Hermes MCP integration** — https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp
+- **OpenCLI (upstream CLI)** — https://github.com/jackwener/OpenCLI (Apache-2.0)
+- **opencli-admin (not used)** — https://github.com/xjh1994/opencli-admin
+  (evaluated in feature-audit.md; decided to rewrite)
+- **Hermes Agent** — https://hermes-agent.nousresearch.com/docs
 - **FastMCP** — https://github.com/jlowin/fastmcp
 - **Model Context Protocol spec** — https://modelcontextprotocol.io
 
@@ -667,11 +614,12 @@ After every deploy:
 
 | Term | Meaning |
 |------|---------|
-| **Central** | The VPS running Hermes + fleet-mcp + opencli-admin |
-| **Node** | A laptop running `agent_server.py` + opencli + Chrome |
+| **Central / hub** | The VPS running Hermes + fleet-mcp + fleet-hub |
+| **Node** | A laptop running `fleet-agent` + `opencli` + Chrome |
 | **Brain** | Hermes Agent, the LLM-driven orchestrator |
-| **fleet-mcp** | Our thin MCP server that bridges Hermes to opencli-admin |
-| **Reverse WS** | WebSocket initiated by the node (outbound) to central, used because nodes are behind NAT |
-| **Dispatch** | Sending a collect task from central to a specific node |
-| **Bridge mode** | opencli talking to Chrome via the Browser Bridge extension |
-| **CDP mode** | opencli talking to Chrome via Chrome DevTools Protocol directly |
+| **fleet-mcp** | Our MCP adapter; exposes 6 tools to Hermes |
+| **fleet-hub** | Our central: REST + WS + pipeline (replaces opencli-admin) |
+| **fleet-agent** | Our laptop process: WS client + subprocess runner |
+| **Reverse WS** | WebSocket initiated by the node (outbound) to the central |
+| **Bridge mode** | opencli talking to Chrome via its Browser Bridge extension + local daemon (default) |
+| **CDP mode** | opencli talking to Chrome/Electron via Chrome DevTools Protocol |
