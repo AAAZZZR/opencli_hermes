@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,11 +7,30 @@ dist/
 build/
 .eggs/
 *.egg
+
+# Environments
 .env
 .venv/
 venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Logs
 *.log
+
+# Testing
 .pytest_cache/
 .coverage
 htmlcov/
 .ruff_cache/
+
+# Claude Code personal memory (not shared)
+
+
+# uv
+fleet-mcp/uv.lock
