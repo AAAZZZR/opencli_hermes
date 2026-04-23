@@ -456,75 +456,38 @@ See `docs/hermes-config.yaml` in the repo.
 
 ## 7. Deployment
 
-### 7.1 VPS setup (one-time)
+The ready-to-run assets live in `deploy/`:
 
-```bash
-# Deps: python >= 3.11, uv or pip, caddy (or any TLS reverse proxy), hermes
+- `deploy/vps/setup.sh` — one-shot VPS installer (apt-installs Caddy, builds venvs, writes `.env`, installs systemd unit, configures Caddy + sslip.io TLS, waits for health).
+- `deploy/vps/fleet-hub.service` — systemd unit template.
+- `deploy/vps/Caddyfile` — TLS reverse proxy template (uses sslip.io so you don't need a domain).
+- `fleet-hub/scripts/install-agent.sh` — bash installer served by `GET /api/v1/nodes/install/agent.sh`. Installs opencli (via npm), creates venv, `pip install`s fleet-agent, writes config, installs systemd `--user` (Linux/WSL) or launchd (macOS), starts service.
 
-# 1. Clone the monorepo
-git clone https://github.com/YOUR_ORG/opencli_agent.git
-cd opencli_agent
+### 7.1 Template runbook → see `deploy/README.md`
 
-# 2. Install fleet-hub and fleet-mcp
-(cd fleet-hub && uv venv .venv && uv pip install -e .)
-(cd fleet-mcp && uv venv .venv && uv pip install -e .)
+Generic instructions suitable for any fork. Uses `YOUR_ORG`, `<VPS_IP>`,
+`<label>` placeholders throughout. Handles troubleshooting for TLS
+issuance, WSL2 + systemd gotcha, agent re-registration.
 
-# 3. Configure
-cp fleet-hub/.env.example fleet-hub/.env
-# Edit: set PUBLIC_URL to your https domain, FLEET_AGENT_INSTALL_SPEC to
-# point at a git URL/branch your laptops can reach.
+### 7.2 This project's runbook → see `.claude/deployment.md`
 
-cp fleet-mcp/.env.example fleet-mcp/.env
+Real values baked in (`AAAZZZR/opencli_hermes`, VPS IP `34.46.31.68`,
+hostname `34.46.31.68.sslip.io`, laptop on WSL2). This is the one to
+follow verbatim for this setup.
 
-# 4. Run fleet-hub (e.g. via systemd, see docs/)
-cd fleet-hub && .venv/bin/python -m fleet_hub
+### 7.3 Hermes MCP config → see `docs/hermes-config.yaml`
 
-# 5. Configure Hermes to launch fleet-mcp via stdio
-vim ~/.hermes/config.yaml   # see docs/hermes-config.yaml
+The snippet merged into `~/.hermes/config.yaml`. Uses absolute path to
+fleet-mcp's venv python plus `PYTHONPATH` in `env:` — Hermes's stdio MCP
+transport does NOT support a `cwd:` field (verified against upstream
+`tools/mcp_tool.py`), and its subprocess env is allowlist-filtered.
 
-# 6. Caddyfile:
-#   fleet.yourdomain.com {
-#     reverse_proxy localhost:8031
-#   }
-```
+### 7.4 Logging into sites (per site per node)
 
-### 7.2 Adding a node (per laptop)
-
-```bash
-# On VPS:
-curl -X POST http://localhost:8031/api/v1/nodes -H "content-type: application/json" \
-  -d '{"label":"alice-mbp"}'
-# → {"id":"...","label":"alice-mbp","token":"...","status":"offline", ...}
-
-# Copy the URL onto the laptop:
-#   curl -fsSL "https://fleet.yourdomain.com/api/v1/nodes/install/agent.sh?label=alice-mbp" | bash
-
-# The installer (see fleet-hub/scripts/install-agent.sh) will:
-#   - verify python >= 3.11 and node >= 21
-#   - npm install -g @jackwener/opencli@latest
-#   - create venv at ~/.fleet-agent/venv
-#   - pip install fleet-agent from FLEET_AGENT_INSTALL_SPEC
-#   - write ~/.fleet-agent/config.env (with token + central URL)
-#   - install a launchd plist (macOS) or systemd --user unit (Linux/WSL)
-#   - start the service
-
-# Verify
-hermes
-> list my nodes
-# → includes alice-mbp as online
-```
-
-### 7.3 Logging into sites (per site per node)
-
-```bash
-# On the laptop — normal Chrome login to each target site.
-#   https://www.xiaohongshu.com/
-#   https://www.zhihu.com/
-#   https://twitter.com/ ...
-# opencli's Bridge mode reuses the user's main Chrome profile.
-# At the next fleet-agent register (or service restart), logged_in_sites
-# will be auto-detected.
-```
+Normal Chrome login on the laptop (xiaohongshu, zhihu, twitter, etc.).
+opencli's Bridge mode reuses the user's Chrome profile, so cookies persist
+across agent restarts. At each fleet-agent register frame,
+`logged_in_sites` is auto-detected via cheap probes (1 result per site).
 
 ---
 

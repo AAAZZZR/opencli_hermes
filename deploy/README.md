@@ -187,15 +187,21 @@ plus `PYTHONPATH` in `env:` as shown.
 Start Hermes:
 
 ```bash
-hermes           # classic chat
-# or
-hermes --tui     # TUI
+hermes           # start chatting
 ```
 
 Ask it in natural language: *"List my fleet nodes"* → Hermes should call
 `fleet.list_nodes` and return the laptop status. *"Fetch the Zhihu hot list
 from home-wsl"* → Hermes should call `fleet.dispatch` (or
 `fleet.dispatch_best`) and summarize the result.
+
+Useful pre-flight commands that appear in the Hermes docs:
+
+```bash
+hermes model                                  # interactive model picker
+hermes config set OPENROUTER_API_KEY sk-or-…  # or ANTHROPIC_API_KEY / OPENAI_API_KEY
+hermes setup                                  # full config wizard
+```
 
 ---
 

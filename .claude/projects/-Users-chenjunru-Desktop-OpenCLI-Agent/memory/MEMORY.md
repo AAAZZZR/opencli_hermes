@@ -1,2 +1,0 @@
-- [Communication language](feedback_language.md) — Chinese for chat, English for code/files
-- [User profile](user_role.md) — Experienced dev building distributed OpenCLI fleet, expects production quality

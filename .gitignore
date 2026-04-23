@@ -30,6 +30,7 @@ htmlcov/
 .ruff_cache/
 
 # Claude Code personal memory (not shared)
+.claude/projects/
 
 
 # uv
