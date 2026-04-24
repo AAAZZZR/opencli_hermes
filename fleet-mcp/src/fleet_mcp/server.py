@@ -142,21 +142,31 @@ async def dispatch(
         str,
         Field(description="Target node — use label (from list_nodes) or UUID"),
     ],
-    site: Annotated[str, Field(description="Site name, e.g. 'xiaohongshu'")],
-    command: Annotated[str, Field(description="Command to run, e.g. 'search'")],
+    site: Annotated[str, Field(description="Site key from list_supported_sites (e.g. 'reddit', 'zhihu', 'arxiv'). Call list_supported_sites first if unsure.")],
+    command: Annotated[str, Field(description="Sub-command for this site. MUST come from that site's `allowed_commands` in list_supported_sites — e.g. 'hot', 'search', 'read' (single post/article by id), 'user', 'question'. fleet-mcp rejects unknown commands with a hint.")],
     args: Annotated[
         dict[str, Any],
-        Field(description='Command flags, e.g. {"limit": 10}'),
+        Field(description='Command flags as a dict, e.g. {"limit": 10, "subreddit": "wallstreetbets"}'),
     ] = {},
     positional_args: Annotated[
         list[Any],
-        Field(description='Positional args (before flags), e.g. ["AI agents"]'),
+        Field(description='Positional args that come BEFORE flags. For single-item reads this is usually [item_id]: reddit read ["1k4j2m3"], zhihu question ["430300881"], bilibili video ["BV1xxx"].'),
     ] = [],
 ) -> dict[str, Any]:
-    """Run an opencli command on a specific node.
+    """Run a specific opencli sub-command on a specific node.
 
-    Items are truncated to MAX_ITEMS_INLINE (default 50) in the response; use
-    get_task_status(task_id) to retrieve the full list.
+    Call `list_supported_sites` FIRST if you don't already know the exact
+    command name for this site — every site has an `allowed_commands` list
+    (reads) and `blocked_commands` list (writes fleet-mcp refuses).
+
+    Typical command patterns across sites:
+      - `hot` / `search` / `trending` → list of items
+      - `read <id>` / `article <id>` / `question <id>` / `video <id>` →
+         one specific item WITH its comments/replies
+      - `user <handle>` / `profile <handle>` → profile info
+
+    Items are truncated to MAX_ITEMS_INLINE (default 50); use
+    `get_task_status(task_id)` for the full list from fleet-hub.
     """
     err = check_whitelist(site, command)
     if err:
@@ -191,15 +201,21 @@ async def dispatch(
 
 @mcp.tool
 async def dispatch_best(
-    site: Annotated[str, Field(description="Site name, e.g. 'zhihu'")],
-    command: Annotated[str, Field(description="Command to run, e.g. 'hot'")],
-    args: Annotated[dict[str, Any], Field(description="Command flags")] = {},
-    positional_args: Annotated[list[Any], Field(description="Positional args")] = [],
+    site: Annotated[str, Field(description="Site key from list_supported_sites. Call list_supported_sites first if unsure.")],
+    command: Annotated[str, Field(description="Sub-command from that site's `allowed_commands` in list_supported_sites. Common reads: hot, search, read (single item by id), user, article, question, video, profile. Unknown commands are rejected with a hint.")],
+    args: Annotated[dict[str, Any], Field(description='Command flags as dict, e.g. {"limit": 10}')] = {},
+    positional_args: Annotated[list[Any], Field(description="Positional args (usually [item_id] for single-item reads like reddit/read, bilibili/video, zhihu/question).")] = [],
 ) -> dict[str, Any]:
-    """Auto-select the best node for a site and run a command.
+    """Auto-pick the best online node for a site and run a command.
 
-    Picks an online node that is logged into the requested site. Prefers the
-    least recently used node if multiple are available.
+    Call `list_supported_sites` FIRST for the exact command name — every site
+    has `allowed_commands` (reads) and `blocked_commands` (writes blocked).
+    fleet-mcp rejects unknown sub-commands before dispatch with a hint.
+
+    Prefers LRU node that's logged into the site. Falls back to any online
+    node if nobody reports the site as logged-in (fine for arxiv, wikipedia,
+    bloomberg, hackernews, etc. that need no login — AUTH_REQUIRED propagates
+    back from opencli if login actually is needed).
     """
     err = check_whitelist(site, command)
     if err:

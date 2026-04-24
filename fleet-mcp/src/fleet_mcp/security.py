@@ -427,7 +427,8 @@ def check_whitelist(site: str, command: str) -> str | None:
         allowed = allowed_commands_for(site)
         return (
             f"Command '{command}' is not a known opencli sub-command for site '{site}'. "
-            f"Allowed for {site}: {', '.join(allowed)}."
+            f"Call `list_supported_sites` to see the full picture — {site}.allowed_commands = "
+            f"[{', '.join(allowed)}]."
         )
 
     return None
