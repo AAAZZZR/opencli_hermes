@@ -145,13 +145,13 @@ async def dispatch(
     site: Annotated[str, Field(description="Site key from list_supported_sites (e.g. 'reddit', 'zhihu', 'arxiv'). Call list_supported_sites first if unsure.")],
     command: Annotated[str, Field(description="Sub-command for this site. MUST come from that site's `allowed_commands` in list_supported_sites — e.g. 'hot', 'search', 'read' (single post/article by id), 'user', 'question'. fleet-mcp rejects unknown commands with a hint.")],
     args: Annotated[
-        dict[str, Any],
+        dict[str, Any] | None,
         Field(description='Command flags as a dict, e.g. {"limit": 10, "subreddit": "wallstreetbets"}'),
-    ] = {},
+    ] = None,
     positional_args: Annotated[
-        list[Any],
+        list[Any] | None,
         Field(description='Positional args that come BEFORE flags. For single-item reads this is usually [item_id]: reddit read ["1k4j2m3"], zhihu question ["430300881"], bilibili video ["BV1xxx"].'),
-    ] = [],
+    ] = None,
 ) -> dict[str, Any]:
     """Run a specific opencli sub-command on a specific node.
 
@@ -168,6 +168,8 @@ async def dispatch(
     Items are truncated to MAX_ITEMS_INLINE (default 50); use
     `get_task_status(task_id)` for the full list from fleet-hub.
     """
+    args = {} if args is None else args
+    positional_args = [] if positional_args is None else positional_args
     err = check_whitelist(site, command)
     if err:
         audit_log("dispatch", node_id=node_id, site=site, command=command, result="blocked")
@@ -203,8 +205,8 @@ async def dispatch(
 async def dispatch_best(
     site: Annotated[str, Field(description="Site key from list_supported_sites. Call list_supported_sites first if unsure.")],
     command: Annotated[str, Field(description="Sub-command from that site's `allowed_commands` in list_supported_sites. Common reads: hot, search, read (single item by id), user, article, question, video, profile. Unknown commands are rejected with a hint.")],
-    args: Annotated[dict[str, Any], Field(description='Command flags as dict, e.g. {"limit": 10}')] = {},
-    positional_args: Annotated[list[Any], Field(description="Positional args (usually [item_id] for single-item reads like reddit/read, bilibili/video, zhihu/question).")] = [],
+    args: Annotated[dict[str, Any] | None, Field(description='Command flags as dict, e.g. {"limit": 10}')] = None,
+    positional_args: Annotated[list[Any] | None, Field(description="Positional args (usually [item_id] for single-item reads like reddit/read, bilibili/video, zhihu/question).")] = None,
 ) -> dict[str, Any]:
     """Auto-pick the best online node for a site and run a command.
 
@@ -217,6 +219,8 @@ async def dispatch_best(
     bloomberg, hackernews, etc. that need no login — AUTH_REQUIRED propagates
     back from opencli if login actually is needed).
     """
+    args = {} if args is None else args
+    positional_args = [] if positional_args is None else positional_args
     err = check_whitelist(site, command)
     if err:
         audit_log("dispatch_best", site=site, command=command, result="blocked")
@@ -283,14 +287,16 @@ async def dispatch_best(
 async def broadcast(
     site: Annotated[str, Field(description="Site name")],
     command: Annotated[str, Field(description="Command to run")],
-    args: Annotated[dict[str, Any], Field(description="Command flags")] = {},
-    positional_args: Annotated[list[Any], Field(description="Positional args")] = [],
+    args: Annotated[dict[str, Any] | None, Field(description="Command flags")] = None,
+    positional_args: Annotated[list[Any] | None, Field(description="Positional args")] = None,
 ) -> dict[str, Any]:
     """Run a command on all online nodes logged into the given site.
 
     Useful for multi-account data collection. Does not fail the whole call if
     one node errors — each node's result is reported independently.
     """
+    args = {} if args is None else args
+    positional_args = [] if positional_args is None else positional_args
     err = check_whitelist(site, command)
     if err:
         audit_log("broadcast", site=site, command=command, result="blocked")
