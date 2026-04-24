@@ -5,7 +5,18 @@
 __PUBLIC_HOST__ {
     encode zstd gzip
 
-    # WebSocket upgrade for /api/v1/nodes/ws
+    # The installer endpoint at /api/v1/nodes/install/* embeds the node's
+    # token in the returned bash script. Exposing it publicly means anyone
+    # who guesses a label can download that node's token. Block it here —
+    # run the installer fetch from inside the VPS instead:
+    #   curl http://localhost:8031/api/v1/nodes/install/agent.sh?label=<label>
+    @installer path /api/v1/nodes/install/*
+    respond @installer 403 {
+        body "installer endpoint is localhost-only. SSH to the VPS and curl http://localhost:8031/api/v1/nodes/install/agent.sh?label=<label>"
+        close
+    }
+
+    # WebSocket upgrade for /api/v1/nodes/ws + regular REST proxy
     reverse_proxy localhost:8031 {
         header_up Host {upstream_hostport}
         header_up X-Real-IP {remote_host}

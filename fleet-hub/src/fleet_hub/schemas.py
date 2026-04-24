@@ -13,7 +13,14 @@ from pydantic import BaseModel, ConfigDict, Field
 # ---------------------------------------------------------------------------
 
 class NodeCreate(BaseModel):
-    label: str = Field(min_length=1, max_length=128)
+    # Labels land in the install-agent.sh bash template and in systemd unit
+    # filenames; restrict to a safe character set to close shell/path
+    # injection vectors. Same pattern enforced on the installer query param.
+    label: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
 
 
 class NodeOut(BaseModel):

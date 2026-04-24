@@ -12,11 +12,14 @@
 #   curl -fsSL "https://fleet.yourdomain.com/api/v1/nodes/install/agent.sh?label=alice-mbp" | bash
 set -euo pipefail
 
-CENTRAL_URL="__CENTRAL_URL__"
-NODE_TOKEN="__NODE_TOKEN__"
-NODE_LABEL="__NODE_LABEL__"
-OPENCLI_NPM_SPEC="__OPENCLI_NPM_SPEC__"
-FLEET_AGENT_INSTALL_SPEC="__FLEET_AGENT_INSTALL_SPEC__"
+# Placeholders are replaced by the hub using `shlex.quote`, so each bare
+# __PLACEHOLDER__ expands into a fully shell-safe literal — either a plain
+# word or a single-quoted string. Do NOT add outer quotes around them.
+CENTRAL_URL=__CENTRAL_URL__
+NODE_TOKEN=__NODE_TOKEN__
+NODE_LABEL=__NODE_LABEL__
+OPENCLI_NPM_SPEC=__OPENCLI_NPM_SPEC__
+FLEET_AGENT_INSTALL_SPEC=__FLEET_AGENT_INSTALL_SPEC__
 
 FLEET_DIR="${HOME}/.fleet-agent"
 VENV_DIR="${FLEET_DIR}/venv"

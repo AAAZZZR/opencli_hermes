@@ -3,6 +3,64 @@
 Records of live deploys. `deployment.md` says *how* to deploy; this says
 *what actually happened*. Append new entries at the top as they occur.
 
+## 2026-04-24 — security hardening: close installer token-leak + shell-injection path
+
+### Trigger
+
+Code review flagged two linked vulnerabilities; verified one by pulling
+`home-wsl`'s token from the public sslip.io URL in a single curl
+(`curl https://34.46.31.68.sslip.io/api/v1/nodes/install/agent.sh?label=home-wsl`
+→ NODE_TOKEN was plain in the response body).
+
+### Changes
+
+**Caddy** (`deploy/vps/Caddyfile` + live `/etc/caddy/Caddyfile`):
+- Blocks `/api/v1/nodes/install/*` from public reverse proxy, returns 403
+  with a message telling the operator to SSH to the VPS and curl
+  localhost:8031 instead. All other paths unaffected.
+
+**fleet-hub**:
+- `schemas.NodeCreate.label`: `Field(pattern=r"^[A-Za-z0-9._-]+$", max_length=64)`.
+  Rejects shell-special chars, whitespace, newlines, path-traversal. Also
+  applied to the installer `label` query param as defence-in-depth.
+- `api/install.py::_render`: every `__PLACEHOLDER__` substitution now goes
+  through `shlex.quote`. Closes the naked-`.replace` injection path if a
+  malicious label ever slips past the regex.
+- `scripts/install-agent.sh`: placeholders are now bare (no surrounding
+  `"..."`), since `shlex.quote` produces a fully shell-safe literal. For
+  simple values that's the value as-is; for weird values it's a
+  single-quoted bash string.
+
+### Deploy-side operational change
+
+New-node workflow can no longer be `curl -fsSL "https://<vps>/install..." | bash`
+from a fresh laptop. Instead:
+
+```bash
+# On VPS (SSH in)
+curl -sS "http://localhost:8031/api/v1/nodes/install/agent.sh?label=mac-dev" > /tmp/agent.sh
+# Then get it to the laptop — e.g. SCP from the laptop:
+scp rudy871211@34.46.31.68:/tmp/agent.sh ~/
+bash ~/agent.sh
+```
+
+Or open an SSH tunnel from the laptop and curl through it. Rationale in
+the Caddy block comment — single-user fleet doesn't need a public
+installer endpoint.
+
+### Verification
+
+- Public curl of `/install/agent.sh?label=home-wsl` → `403`.
+- Public curl of `/health` → `200` (proxy still works for non-install paths).
+- Localhost curl of `/install/agent.sh?label=<valid>` → `200` with rendered
+  script showing `CENTRAL_URL=https://...` (bare, simple value) and
+  `FLEET_AGENT_INSTALL_SPEC='git+https://...#subdirectory=fleet-agent'`
+  (single-quoted because `#` is bash-significant).
+- `POST /nodes {"label": "evil\"; rm -rf /"}` → `422` with Pydantic
+  pattern-mismatch error.
+- Tests: 50 passing (was 35) — added 15 new in `tests/test_install.py`
+  covering rendered-script content, regex rejections, and shlex round-trip.
+
 ## 2026-04-24 — Hermes discoverability: expose `allowed_commands` per site
 
 ### Trigger
