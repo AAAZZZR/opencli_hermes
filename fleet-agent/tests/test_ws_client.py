@@ -165,6 +165,41 @@ async def test_register_and_dispatch_roundtrip(hub: FakeHub, patched_agent, monk
             await run_task
 
 
+async def test_runner_exception_becomes_generic_frame(
+    hub: FakeHub, patched_agent, monkeypatch
+):
+    """Regression: an exception inside `run_opencli` must still produce a
+    result frame back to the hub, not disappear into an asyncio Task that
+    prints "Task exception was never retrieved" at GC while the hub hangs
+    waiting for the reply.
+    """
+    async def _fake_run(_bin: str, **_kw):
+        raise RuntimeError("unexpected runner bug")
+
+    monkeypatch.setattr(ws_client, "run_opencli", _fake_run)
+
+    async def _fake_version(self):
+        return "1.7.7"
+    monkeypatch.setattr(ws_client.AgentClient, "_detect_opencli_version", _fake_version)
+
+    client = ws_client.AgentClient()
+    run_task = asyncio.create_task(client.run())
+    try:
+        await hub.wait_registered(timeout=3.0)
+        await hub.send_collect("task-boom", "zhihu", "hot")
+        result = await hub.next_result(timeout=3.0)
+        assert result["task_id"] == "task-boom"
+        assert result["success"] is False
+        assert result["error"]["code"] == "GENERIC"
+        assert "RuntimeError" in result["error"]["message"]
+        assert "unexpected runner bug" in result["error"]["message"]
+    finally:
+        await client.stop()
+        run_task.cancel()
+        with pytest.raises((asyncio.CancelledError, Exception)):
+            await run_task
+
+
 async def test_auth_required_result_propagates(hub: FakeHub, patched_agent, monkeypatch):
     async def _fake_run(_bin: str, **_kw):
         return RunResult(

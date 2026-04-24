@@ -156,31 +156,75 @@ class AgentClient:
         except ConnectionClosed:
             logger.info("connection closed")
         finally:
-            # Let any in-flight tasks finish — they'll try to send results;
-            # if the socket is dead the send will raise and they'll log.
-            for t in list(self._in_flight):
-                if not t.done():
+            # Drain in-flight tasks briefly before cancelling. They might
+            # have already finished opencli and be in the middle of
+            # `ws.send(result_frame)` — cancelling mid-send loses the
+            # result even though the scrape actually succeeded. Wait up to
+            # `ws_shutdown_grace_sec` for them; anything still running
+            # gets cancelled so we don't hang reconnect forever.
+            pending = {t for t in self._in_flight if not t.done()}
+            if pending:
+                grace = settings.ws_shutdown_grace_sec
+                logger.info(
+                    "draining %d in-flight task(s) (grace %.1fs)",
+                    len(pending), grace,
+                )
+                _, still_pending = await asyncio.wait(pending, timeout=grace)
+                for t in still_pending:
                     t.cancel()
+                if still_pending:
+                    logger.warning(
+                        "cancelled %d task(s) that didn't drain in time",
+                        len(still_pending),
+                    )
             self._in_flight.clear()
 
     async def _run_collect(self, ws, frame: dict[str, Any]) -> None:
         task_id = frame.get("task_id") or ""
-        site = frame.get("site") or ""
-        command = frame.get("command") or ""
-        args = frame.get("args") or {}
-        positional = frame.get("positional_args") or []
-        fmt = frame.get("format") or "json"
-        timeout = float(frame.get("timeout") or 120)
+        try:
+            site = frame.get("site") or ""
+            command = frame.get("command") or ""
+            args = frame.get("args") or {}
+            positional = frame.get("positional_args") or []
+            fmt = frame.get("format") or "json"
+            timeout = float(frame.get("timeout") or 120)
 
-        logger.info("dispatch task=%s %s/%s", task_id, site, command)
-        result = await run_opencli(
-            settings.opencli_bin,
-            site=site, command=command,
-            args=args, positional_args=list(positional),
-            format=fmt, timeout_sec=timeout,
-        )
-        out_frame = result.to_frame(task_id)
+            logger.info("dispatch task=%s %s/%s", task_id, site, command)
+            result = await run_opencli(
+                settings.opencli_bin,
+                site=site, command=command,
+                args=args, positional_args=list(positional),
+                format=fmt, timeout_sec=timeout,
+            )
+            out_frame = result.to_frame(task_id)
+        except asyncio.CancelledError:
+            # Let cancellation during shutdown propagate so the task cleanly
+            # exits; don't swallow it into a fake result frame.
+            raise
+        except Exception as exc:
+            # Anything else (JSON parse bug, runner bug, transient error)
+            # should still report back to the hub so it doesn't wait out the
+            # task_timeout. Without this wrapper the exception escapes into
+            # asyncio's "Task exception never retrieved" and the hub hangs.
+            logger.exception("collect task %s failed pre-send", task_id)
+            out_frame = {
+                "type": "result",
+                "task_id": task_id,
+                "success": False,
+                "items": [],
+                "exit_code": -1,
+                "duration_ms": 0,
+                "error": {
+                    "code": "GENERIC",
+                    "message": f"agent error: {type(exc).__name__}: {exc}",
+                    "exit_code": -1,
+                    "stderr": "",
+                },
+            }
+
         try:
             await ws.send(json.dumps(out_frame))
         except ConnectionClosed:
             logger.warning("ws closed before result for task %s could be sent", task_id)
+        except Exception:
+            logger.exception("unexpected error sending result frame for %s", task_id)

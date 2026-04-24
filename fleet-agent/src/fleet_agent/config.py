@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     ws_reconnect_max_sec: float = 60.0
     ws_ping_interval_sec: float = 30.0
     ws_ping_timeout_sec: float = 10.0
+    # When the WS drops, give in-flight _run_collect tasks up to this many
+    # seconds to finish sending their result frames before we cancel them.
+    # Prevents losing a scrape result to an orderly hub restart while the
+    # agent was mid-`ws.send`.
+    ws_shutdown_grace_sec: float = 5.0
 
     # Login probe
     login_probe_timeout_sec: float = 10.0

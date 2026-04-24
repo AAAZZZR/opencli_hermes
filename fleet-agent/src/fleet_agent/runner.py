@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shlex
+import signal
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -176,6 +178,12 @@ async def run_opencli(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Put opencli in its own process group so we can nuke the whole
+            # tree on timeout. Without this, `proc.kill()` only SIGKILLs the
+            # node process and leaves opencli's Chrome/Bridge helper
+            # children behind as orphans. Unix-only; fleet-agent is not
+            # supported on native Windows anyway.
+            start_new_session=True,
         )
     except FileNotFoundError:
         return RunResult(
@@ -187,8 +195,19 @@ async def run_opencli(
     try:
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        # Kill the whole process group so opencli's browser helpers die
+        # with it. If the process is already gone ProcessLookupError is
+        # harmless. After the kill, drain the pipes with a short timeout —
+        # `communicate()` was cancelled mid-read, and leaving PIPE transports
+        # attached to a killed process leaks FDs on macOS.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            pass
         duration_ms = int((time.monotonic() - t0) * 1000)
         return RunResult(
             success=False, items=[], exit_code=75, duration_ms=duration_ms,
