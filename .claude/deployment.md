@@ -101,9 +101,20 @@ recreate.
 
 ---
 
-## 3. Laptop (WSL2) — install fleet-agent
+## 3. Laptop — install fleet-agent
 
-In a WSL2 terminal on the laptop:
+> **Note (post-2026-04-24):** the installer endpoint is no longer reachable
+> from the public internet. `/api/v1/nodes/install/agent.sh` is blocked at
+> the Caddy layer to stop anyone who guesses a label from downloading the
+> node's token. See `deployment-log.md` for the attack chain that closed.
+> Current flow pipes the installer through SSH — the laptop fetches
+> localhost:8031 on the VPS via the SSH tunnel and runs the output.
+>
+> Future: see `.claude/develop/install-ticket.md` for a planned one-time
+> URL that will restore the pure `curl | bash` UX without SSH. Not built
+> yet.
+
+In a terminal on the laptop:
 
 ```bash
 # Prereqs — Node.js >= 21 via nvm
@@ -111,9 +122,27 @@ curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
 source ~/.bashrc
 nvm install 22
 
-# Agent install (pulls opencli, fleet-agent, writes config, starts service)
-curl -fsSL "https://34.46.31.68.sslip.io/api/v1/nodes/install/agent.sh?label=home-wsl" | bash
+# Agent install via SSH pipe. The laptop fetches the installer from
+# localhost:8031 on the VPS (reached through SSH) and runs it.
+ssh rudy871211@34.46.31.68 \
+    'curl -s "http://localhost:8031/api/v1/nodes/install/agent.sh?label=home-wsl"' \
+  | bash
 ```
+
+One-line shell function for frequent use — drop in `~/.zshrc` / `~/.bashrc`:
+
+```bash
+fleet-install() {
+    local label="${1:?usage: fleet-install <label>}"
+    ssh rudy871211@34.46.31.68 \
+        "curl -s 'http://localhost:8031/api/v1/nodes/install/agent.sh?label=$label'" | bash
+}
+# then:  fleet-install home-wsl
+```
+
+The installer substitutes the NODE_TOKEN into the script at the hub side
+(via `shlex.quote` — label is regex-validated upstream), so the token
+arrives inside the SSH-encrypted stream and never touches shell history.
 
 ### WSL2 + systemd gotcha
 

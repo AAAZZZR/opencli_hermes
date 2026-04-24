@@ -336,6 +336,17 @@ Hermes' context. Full records are always retrievable via `get_task_status`.
 - Token is included in the WS register frame; hub validates by DB lookup.
 - Revoking a node: `DELETE /api/v1/nodes/{label}`. The active WS is
   force-closed and the row is removed — other nodes unaffected.
+- Installer endpoint (`GET /api/v1/nodes/install/agent.sh?label=<X>`)
+  embeds the node's token in the rendered bash. To stop anyone who
+  guesses a label from scraping tokens off the public URL, the shipped
+  Caddyfile blocks `/api/v1/nodes/install/*` from the reverse proxy
+  since 2026-04-24 — the endpoint is localhost-only, and new-node
+  installs pipe through SSH (see `deployment.md` §3). Labels are also
+  regex-validated (`^[A-Za-z0-9._-]+$`) and every substitution in the
+  bash template goes through `shlex.quote`, closing shell-injection via
+  malicious label. Future planned upgrade: one-time install tickets so
+  we can re-open the public route safely — see
+  `develop/install-ticket.md`.
 
 ### 5.2 Command whitelist (fleet-mcp only) — deny-list model
 

@@ -39,7 +39,8 @@ opencli_agent/
 │   ├── feature-audit.md      ← why we rewrote instead of using opencli-admin
 │   ├── deployment.md         ← real deployment runbook (with this project's IP + repo)
 │   ├── deployment-log.md     ← dated record of what actually happened during deploys (gotchas, state, fixes)
-│   └── research/             ← raw artifacts from one-off research tasks (audit trail; code is source of truth)
+│   ├── research/             ← raw artifacts from one-off research tasks (audit trail; code is source of truth)
+│   └── develop/              ← designs for features not yet built (future work queue)
 │
 ├── fleet-mcp/                ← MCP adapter; Hermes launches via stdio
 │   └── src/fleet_mcp/
@@ -94,6 +95,7 @@ opencli_agent/
 | Why didn't we use `opencli-admin`? | `feature-audit.md` |
 | How do I deploy this? | `deployment.md` (this project's values); `deploy/README.md` (template) |
 | What actually happened during past deploys / gotchas encountered? | `deployment-log.md` |
+| What features are designed but not yet built? | `develop/` |
 | How does a dispatch flow end-to-end? | `spec.md` §2.1 + `fleet-hub/src/fleet_hub/api/tasks.py::_dispatch_and_persist` |
 | What are the 6 MCP tools? | `fleet-mcp/src/fleet_mcp/server.py` (definitive) or `spec.md` §4.3 |
 | What sites/commands are allowed? | `fleet-mcp/src/fleet_mcp/security.py::SUPPORTED_SITES` |
@@ -159,10 +161,12 @@ section in the same commit.
 4. **The hub's SQLite DB is authoritative.** Hermes context window
    truncates; `get_task_status` always reads back from the DB.
 5. **Installer gets the token from the URL.** `GET /api/v1/nodes/install/agent.sh?label=<label>`
-   substitutes the node's token into the bash script at request time.
-   Anyone who can hit this endpoint can download any node's token — don't
-   expose the hub publicly without a reverse proxy + auth, or restrict
-   the endpoint further.
+   substitutes the node's token into the bash script at request time, with
+   every value shell-escaped via `shlex.quote`. Anyone who can hit this
+   endpoint can download any node's token, so Caddy blocks public access
+   since 2026-04-24 (see `deployment-log.md`). The live flow pipes through
+   SSH to localhost — `develop/install-ticket.md` tracks a planned
+   one-time-URL scheme that would re-open public access safely.
 
 ## If you're stuck
 
