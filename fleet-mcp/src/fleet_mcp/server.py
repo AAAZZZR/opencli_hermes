@@ -31,6 +31,7 @@ from fleet_mcp.security import (
     SITE_DESCRIPTIONS,
     SUPPORTED_SITES,
     audit_log,
+    blocked_commands_for,
     check_whitelist,
     rate_limiter,
     sanitize,
@@ -112,16 +113,23 @@ async def list_nodes() -> dict[str, Any]:
 
 @mcp.tool
 async def list_supported_sites() -> dict[str, Any]:
-    """List all whitelisted (site, command) pairs that can be dispatched."""
+    """List every site fleet-mcp will dispatch to.
+
+    Policy is deny-list: any `opencli <site> <sub-command>` is allowed unless
+    the sub-command appears in `blocked_commands` for that site (write / mutation
+    operations like post, comment, like, follow, upvote, etc.) or in the
+    framework-level global block list. Unknown sub-commands are rejected by
+    opencli downstream, not by fleet-mcp.
+    """
     audit_log("list_supported_sites")
     return {
         "sites": [
             SiteInfo(
                 site=site,
-                commands=sorted(commands),
                 description=SITE_DESCRIPTIONS.get(site, site),
+                blocked_commands=blocked_commands_for(site),
             ).model_dump()
-            for site, commands in sorted(SUPPORTED_SITES.items())
+            for site in sorted(SUPPORTED_SITES)
         ],
     }
 
@@ -197,22 +205,22 @@ async def dispatch_best(
         return DispatchResult(success=False, error=err).model_dump(mode="json")
 
     nodes = await hub_client.list_nodes()
-    online_for_site = [n for n in nodes if n.status == "online" and site in n.logged_in_sites]
+    online_nodes = [n for n in nodes if n.status == "online"]
+    online_for_site = [n for n in online_nodes if site in n.logged_in_sites]
 
     if not online_for_site:
-        online = [n.label for n in nodes if n.status == "online"]
-        all_with_site = [n.label for n in nodes if site in n.logged_in_sites]
-        if not online:
-            msg = "No nodes are online"
-        elif not all_with_site:
-            msg = f"No nodes are logged in to '{site}'"
-        else:
-            msg = (
-                f"Nodes logged in to '{site}' ({', '.join(all_with_site)}) are all offline. "
-                f"Online nodes: {', '.join(online)}"
-            )
-        audit_log("dispatch_best", site=site, command=command, result="no_node")
-        return DispatchResult(success=False, error=msg).model_dump(mode="json")
+        # No node is verified-logged-in for this site. Fall back to any online
+        # node — many sites (arxiv, wikipedia, bloomberg, hackernews, ...) need
+        # no login, and login_detect only probes a handful of sites at register
+        # time. If the site actually needs login and the chosen node lacks it,
+        # opencli will return AUTH_REQUIRED and the error propagates back
+        # through WS → hub → here naturally.
+        if not online_nodes:
+            audit_log("dispatch_best", site=site, command=command, result="no_node")
+            return DispatchResult(
+                success=False, error="No nodes are online"
+            ).model_dump(mode="json")
+        online_for_site = online_nodes
 
     # Least-recently-used — stable datetime comparison.
     _SENTINEL = datetime.min.replace(tzinfo=timezone.utc)
@@ -274,7 +282,12 @@ async def broadcast(
         ).model_dump(mode="json")
 
     nodes = await hub_client.list_nodes()
-    targets = [n for n in nodes if n.status == "online" and site in n.logged_in_sites]
+    online_nodes = [n for n in nodes if n.status == "online"]
+    targets = [n for n in online_nodes if site in n.logged_in_sites]
+    if not targets:
+        # Same reasoning as dispatch_best: many sites don't need login; fall
+        # back to every online node. AUTH_REQUIRED propagates per-node.
+        targets = online_nodes
     if not targets:
         audit_log("broadcast", site=site, command=command, result="no_nodes")
         return BroadcastResult(total_nodes=0).model_dump(mode="json")

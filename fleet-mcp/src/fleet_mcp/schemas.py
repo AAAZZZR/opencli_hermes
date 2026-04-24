@@ -67,8 +67,10 @@ class NodeInfo(BaseModel):
 
 class SiteInfo(BaseModel):
     site: str
-    commands: list[str]
     description: str
+    # Write/mutation sub-commands blocked for this site (empty = nothing blocked,
+    # i.e. every opencli sub-command for this site is allowed).
+    blocked_commands: list[str] = Field(default_factory=list)
 
 
 class DispatchResult(BaseModel):

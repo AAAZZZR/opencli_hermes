@@ -337,33 +337,67 @@ Hermes' context. Full records are always retrievable via `get_task_status`.
 - Revoking a node: `DELETE /api/v1/nodes/{label}`. The active WS is
   force-closed and the row is removed — other nodes unaffected.
 
-### 5.2 Command whitelist (fleet-mcp only)
+### 5.2 Command whitelist (fleet-mcp only) — deny-list model
 
-Defined in `fleet_mcp/security.py::SUPPORTED_SITES`. Default set:
+Defined in `fleet_mcp/security.py`. Model flipped from allow-list to deny-list
+on 2026-04-24 (see `deployment-log.md`): the goal is "Hermes orchestrates every
+opencli capability, except writes on your account". Shape:
 
 ```python
-SUPPORTED_SITES = {
-    "xiaohongshu": {"search", "note", "feed", "user"},
-    "zhihu":       {"hot", "search", "question"},
-    "bilibili":    {"hot", "search", "ranking"},
-    "weibo":       {"hot", "search"},
-    "twitter":     {"search", "timeline", "profile"},
-    "reddit":      {"hot", "subreddit", "search"},
+# Every opencli site fleet-mcp will dispatch to — 101 sites, derived from
+# `opencli --help` minus framework verbs and external-CLI passthroughs.
+SUPPORTED_SITES = frozenset({"1688","36kr",...,"zhihu","zsxq"})
+
+# Framework-level bans (always blocked, regardless of site)
+FORBIDDEN_GLOBAL = {
+    "browser", "eval", "register", "install", "plugin",
+    "daemon", "adapter", "synthesize", "record", "exec", "shell",
 }
 
-FORBIDDEN_COMMANDS = {
-    "browser", "eval", "register", "install", "plugin", "daemon",
-    "adapter", "synthesize", "generate", "record", "exec", "shell",
+# Per-site write/mutation sub-commands (LLM must never run these on the
+# user's account). Sites not in this dict have no blocked sub-commands.
+FORBIDDEN_PER_SITE = {
+    "reddit":   {"comment", "save", "subscribe", "upvote"},
+    "zhihu":    {"answer", "comment", "favorite", "follow", "like"},
+    "twitter":  {"post","reply","like","follow","delete","block",...},
+    "instagram":{"post","comment","like","follow","save","story","reel",...},
+    # ...37 sites total that have at least one write verb
 }
 ```
 
+`check_whitelist(site, cmd)` returns `None` iff:
+1. `site ∈ SUPPORTED_SITES`, and
+2. `cmd ∉ FORBIDDEN_GLOBAL`, and
+3. `cmd ∉ FORBIDDEN_PER_SITE.get(site, ∅)`.
+
+Otherwise it returns an error message describing which rule rejected the call.
+Unknown sub-commands are NOT pre-validated (opencli rejects them downstream);
+this avoids fleet-mcp maintaining the full per-site sub-command catalogue.
+
+**Framework bans (global):**
 - `browser`, `eval` — JS injection / page mutation
 - `register`, `install`, `plugin` — install arbitrary CLIs / npm packages
-- `daemon`, `adapter`, `synthesize`, `generate`, `record` — write/mutate
-  adapter state or capture cross-tab XHRs
+- `daemon`, `adapter`, `synthesize`, `record`, `exec`, `shell` — write/mutate
+  adapter state, execute arbitrary shell
 
-Per-site-per-command allowlist is the model; expand `SUPPORTED_SITES` when
-you want new capabilities.
+**Per-site write bans (sample categories):**
+- **Social writes:** `post`, `reply`, `comment`, `like`/`unlike`, `follow`/`unfollow`,
+  `subscribe`/`unsubscribe`, `upvote`/`downvote`, `save`/`unsave`,
+  `bookmark`/`unbookmark`, `block`/`unblock`, `delete`, `publish`, `repost`
+- **AI chat writes:** `ask`, `send`, `new`, `model`, `image` (quota-consuming) —
+  applied to chatgpt, chatgpt-app, chatwise, codex, cursor, deepseek, doubao,
+  doubao-app, gemini, grok, yuanbao, antigravity
+- **E-commerce:** `add-cart` / `add-to-cart` (coupang, jd, taobao)
+- **Recruiter (boss):** `batchgreet`, `greet`, `invite`, `exchange`, `mark`, `send`
+- **Cloud drive (quark):** `mkdir`, `mv`, `rename`, `rm`, `save`
+- **Spotify:** all playback + auth (`play`, `pause`, `next`, `prev`, `queue`,
+  `volume`, `shuffle`, `repeat`, `auth`)
+- **v2ex:** `daily` (account sign-in & coin claim)
+- **AI image gen:** `yollomi` all `generate`-type, `jimeng generate`/`new`
+
+Full list lives in `fleet_mcp/security.py::FORBIDDEN_PER_SITE`. Adding a new
+site: append to `SUPPORTED_SITES`, add its description, add its writes (if
+any) to `FORBIDDEN_PER_SITE`. No code change to `check_whitelist` needed.
 
 ### 5.3 Rate limiting (fleet-mcp)
 

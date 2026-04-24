@@ -19,31 +19,53 @@ from fleet_mcp.security import (
 # ---------------------------------------------------------------------------
 
 class TestWhitelist:
-    def test_allowed(self):
+    def test_allowed_reads(self):
+        # Classic reads, still work under deny-list model
         assert check_whitelist("xiaohongshu", "search") is None
         assert check_whitelist("zhihu", "hot") is None
         assert check_whitelist("reddit", "subreddit") is None
 
-    def test_forbidden_command(self):
+    def test_newly_allowed_reads(self):
+        # Reads that the old allow-list rejected but we now permit
+        assert check_whitelist("reddit", "read") is None          # read post + comments
+        assert check_whitelist("reddit", "frontpage") is None
+        assert check_whitelist("zhihu", "question") is None
+        assert check_whitelist("twitter", "timeline") is None
+        assert check_whitelist("facebook", "feed") is None        # facebook is now supported
+        assert check_whitelist("arxiv", "search") is None         # new site
+
+    def test_forbidden_global_command(self):
         err = check_whitelist("xiaohongshu", "eval")
         assert err is not None
-        assert "forbidden" in err.lower()
+        assert "globally forbidden" in err.lower()
 
-    def test_unknown_site(self):
-        err = check_whitelist("facebook", "search")
+    def test_unsupported_site(self):
+        err = check_whitelist("totally-not-a-real-site", "search")
         assert err is not None
         assert "not supported" in err.lower()
 
-    def test_unknown_command_for_known_site(self):
-        err = check_whitelist("zhihu", "delete")
+    def test_blocked_write_on_known_site(self):
+        # Write-type sub-commands must be blocked
+        err = check_whitelist("zhihu", "answer")
         assert err is not None
-        assert "not allowed" in err.lower()
+        assert "blocked" in err.lower() or "write" in err.lower()
 
-    def test_forbidden_overrides_site(self):
-        # Even if someone added "shell" to a site, it should be blocked
-        err = check_whitelist("zhihu", "shell")
+    def test_blocked_write_reddit(self):
+        err = check_whitelist("reddit", "comment")
         assert err is not None
-        assert "forbidden" in err.lower()
+        err = check_whitelist("reddit", "upvote")
+        assert err is not None
+
+    def test_blocked_write_twitter(self):
+        for verb in ("post", "reply", "follow", "like", "delete", "block"):
+            err = check_whitelist("twitter", verb)
+            assert err is not None, f"twitter {verb} should be blocked"
+
+    def test_global_ban_beats_missing_site_entry(self):
+        # A site with no entry in FORBIDDEN_PER_SITE should still reject global bans
+        err = check_whitelist("arxiv", "shell")
+        assert err is not None
+        assert "globally forbidden" in err.lower()
 
 
 # ---------------------------------------------------------------------------

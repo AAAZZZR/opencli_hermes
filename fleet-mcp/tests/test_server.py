@@ -90,12 +90,23 @@ async def test_list_supported_sites(client: Client):
     result = await client.call_tool("list_supported_sites", {})
     data = result.data
     assert "sites" in data
-    sites = {s["site"] for s in data["sites"]}
-    assert "xiaohongshu" in sites
-    assert "zhihu" in sites
+    sites_by_name = {s["site"]: s for s in data["sites"]}
+    # Core sites stay in
+    for name in ("xiaohongshu", "zhihu", "reddit", "twitter"):
+        assert name in sites_by_name
+    # Expanded catalogue includes dozens more
+    assert len(sites_by_name) >= 100
+    # Every site has a description; blocked_commands may be empty
     for s in data["sites"]:
-        assert len(s["commands"]) > 0
+        assert isinstance(s["blocked_commands"], list)
         assert len(s["description"]) > 0
+    # Sites with known writes expose them via blocked_commands
+    assert "answer" in sites_by_name["zhihu"]["blocked_commands"]
+    assert "comment" in sites_by_name["reddit"]["blocked_commands"]
+    assert "post" in sites_by_name["twitter"]["blocked_commands"]
+    # Read-heavy sites have no blocked_commands
+    assert sites_by_name["arxiv"]["blocked_commands"] == []
+    assert sites_by_name["wikipedia"]["blocked_commands"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -249,18 +260,29 @@ async def test_dispatch_best_no_nodes(client: Client, monkeypatch):
     assert "no nodes" in data["error"].lower()
 
 
-async def test_dispatch_best_no_node_with_site(client: Client, monkeypatch):
+async def test_dispatch_best_falls_back_when_no_logged_in_node(client: Client, monkeypatch):
+    """If no node reports being logged into the target site, dispatch_best
+    falls back to any online node. Many sites (arxiv, wikipedia, ...) don't
+    need login; for sites that do, AUTH_REQUIRED propagates back per-task.
+    """
+    captured: dict[str, Any] = {}
+
     async def _fake_list():
-        return [_make_node("alice", sites=["xiaohongshu"])]
+        return [_make_node("alice", sites=["xiaohongshu"])]  # not logged into zhihu
+
+    async def _fake_dispatch(**kwargs: Any) -> HubTaskResult:
+        captured["node_id"] = kwargs["node_id"]
+        return _make_task(node_id=kwargs["node_id"], items=[{"title": "t"}])
 
     monkeypatch.setattr(hub_client, "list_nodes", _fake_list)
+    monkeypatch.setattr(hub_client, "dispatch", _fake_dispatch)
 
     result = await client.call_tool("dispatch_best", {
         "site": "zhihu", "command": "hot",
     })
     data = result.data
-    assert data["success"] is False
-    assert "logged in to" in data["error"]
+    assert data["success"] is True
+    assert captured["node_id"] == "alice"  # fell back to the online non-logged-in node
 
 
 async def test_dispatch_best_picks_lru(client: Client, monkeypatch):

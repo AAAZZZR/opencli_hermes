@@ -37,7 +37,8 @@ opencli_agent/
 │   ├── README.md             ← this file
 │   ├── spec.md               ← full architecture spec + WS/REST contracts
 │   ├── feature-audit.md      ← why we rewrote instead of using opencli-admin
-│   └── deployment.md         ← real deployment runbook (with this project's IP + repo)
+│   ├── deployment.md         ← real deployment runbook (with this project's IP + repo)
+│   └── deployment-log.md     ← dated record of what actually happened during deploys (gotchas, state, fixes)
 │
 ├── fleet-mcp/                ← MCP adapter; Hermes launches via stdio
 │   └── src/fleet_mcp/
@@ -91,6 +92,7 @@ opencli_agent/
 | What's the REST / WS contract? | `spec.md` §4 (authoritative) |
 | Why didn't we use `opencli-admin`? | `feature-audit.md` |
 | How do I deploy this? | `deployment.md` (this project's values); `deploy/README.md` (template) |
+| What actually happened during past deploys / gotchas encountered? | `deployment-log.md` |
 | How does a dispatch flow end-to-end? | `spec.md` §2.1 + `fleet-hub/src/fleet_hub/api/tasks.py::_dispatch_and_persist` |
 | What are the 6 MCP tools? | `fleet-mcp/src/fleet_mcp/server.py` (definitive) or `spec.md` §4.3 |
 | What sites/commands are allowed? | `fleet-mcp/src/fleet_mcp/security.py::SUPPORTED_SITES` |
