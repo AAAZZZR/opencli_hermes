@@ -68,8 +68,12 @@ class NodeInfo(BaseModel):
 class SiteInfo(BaseModel):
     site: str
     description: str
-    # Write/mutation sub-commands blocked for this site (empty = nothing blocked,
-    # i.e. every opencli sub-command for this site is allowed).
+    # Sub-commands the LLM may dispatch (opencli catalog minus blocked writes
+    # minus framework-global bans). If empty, opencli exposes no read-type
+    # command for this site (e.g. grok / yuanbao are entirely blocked write
+    # platforms).
+    allowed_commands: list[str] = Field(default_factory=list)
+    # Write/mutation sub-commands that fleet-mcp blocks for this site.
     blocked_commands: list[str] = Field(default_factory=list)
 
 

@@ -3,6 +3,64 @@
 Records of live deploys. `deployment.md` says *how* to deploy; this says
 *what actually happened*. Append new entries at the top as they occur.
 
+## 2026-04-24 — Hermes discoverability: expose `allowed_commands` per site
+
+### Trigger
+
+After flipping to deny-list, Hermes still couldn't read a Reddit post. Audit
+log showed the guessing chain: `reddit fetch` (pre-flip, rejected by old
+allow-list) → `reddit search` (0 results) → `web fetch` (post-flip, allowed
+through whitelist because `fetch ∉ blacklist`, but opencli only has
+`web read`, so GENERIC failure at the laptop). Hermes never tried
+`reddit read` because `list_supported_sites` didn't expose it — the tool
+returned `blocked_commands` (what not to call) but no positive list of
+what *is* callable.
+
+### Root cause
+
+Deny-list semantics were correctly implemented at the access-control layer,
+but the **discovery** surface was still allow-list-era: we removed the list
+of allowed commands without giving Hermes a replacement. So the LLM fell
+back to training-data guesses (`fetch` is a common "URL reader" verb), and
+every wrong guess cost a round-trip to opencli on the laptop.
+
+### Changes
+
+`fleet-mcp/src/fleet_mcp/security.py`:
+- Add `SITE_COMMANDS: dict[str, frozenset[str]]` — full per-site catalog of
+  every opencli sub-command (reads + writes combined, 101 sites, ~700
+  commands). Derived from the same `.claude/research/` categorizations
+  that produced `FORBIDDEN_PER_SITE`.
+- Add `allowed_commands_for(site)` helper → `catalog - blocked - global`.
+- `check_whitelist` now rejects unknown sub-commands with a hint
+  ("Command 'fetch' is not a known opencli sub-command for site 'web'.
+  Allowed for web: read."). That saves a round-trip to opencli AND gives
+  the LLM enough signal to self-correct on the next tool call.
+
+`fleet-mcp/src/fleet_mcp/schemas.py`:
+- `SiteInfo.allowed_commands: list[str]` added alongside `blocked_commands`.
+
+`fleet-mcp/src/fleet_mcp/server.py`:
+- `list_supported_sites` populates both fields; docstring updated so the
+  LLM knows to pick from `allowed_commands` and that writes live in
+  `blocked_commands`.
+
+### Verification
+
+- Local tests: 54 passing (was 47), added `allowed_commands_for`
+  coverage + the two real Hermes failure modes (`web fetch`, `reddit fetch`)
+  reproduced as regression tests.
+- VPS spot-check: `check_whitelist("web", "fetch")` →
+  "Command 'fetch' is not a known opencli sub-command for site 'web'.
+  Allowed for web: read." (exactly what Hermes would have benefited from.)
+
+### User action
+
+Restart Hermes so it re-spawns fleet-mcp subprocess and picks up the new
+tool response shape. Next `list_supported_sites` call will surface
+`allowed_commands` — Hermes can then `dispatch(site=reddit, command=read,
+positional_args=[post_id])` on the first try.
+
 ## 2026-04-24 — security model flip: allow-list → deny-list
 
 ### Trigger
@@ -31,7 +89,7 @@ state" — post, reply, comment, like, follow, subscribe, upvote, save
   passthroughs (docker/gh/lark-cli/obsidian/vercel/wecom-cli).
 - Spawned three general-purpose subagents in parallel, each taking ~34 sites.
   Each ran `opencli <site> --help` for its batch and classified sub-commands
-  as READ / WRITE / UNSURE. Raw output committed to `.claude/tmp/
+  as READ / WRITE / UNSURE. Raw output committed to `.claude/research/
   categorization-{A,B,C}.md` as audit trail.
 - Aggregate: ~447 reads, ~141 writes, 6 unsure. Unsure resolved conservatively
   (`antigravity serve` → WRITE, all AI chat `ask`/`send`/`image`/`new` →
@@ -63,7 +121,7 @@ state" — post, reply, comment, like, follow, subscribe, upvote, save
 `.claude/`:
 - `spec.md` §5.2 rewritten to describe deny-list model with sample blocks.
 - `deployment-log.md` (this entry).
-- `tmp/categorization-{A,B,C}.md` retained as research artifact.
+- `research/categorization-{A,B,C}.md` retained as research artifact.
 
 ### Verification
 
@@ -84,7 +142,7 @@ updated source and picks up the new rules.
 ### Not done / follow-up
 
 - **No commit** — per project convention, user drives commits. The dev mac
-  repo has the new `.claude/tmp/` files plus all source/test edits staged
+  repo has the new `.claude/research/` files plus all source/test edits staged
   as untracked/modified.
 - `deploy/vps/setup.sh` still `uv pip install -e .` (runtime only). If we
   want to run pytest on VPS we'd need `.[dev]`. Optional.

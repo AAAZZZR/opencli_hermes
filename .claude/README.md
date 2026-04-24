@@ -38,7 +38,8 @@ opencli_agent/
 │   ├── spec.md               ← full architecture spec + WS/REST contracts
 │   ├── feature-audit.md      ← why we rewrote instead of using opencli-admin
 │   ├── deployment.md         ← real deployment runbook (with this project's IP + repo)
-│   └── deployment-log.md     ← dated record of what actually happened during deploys (gotchas, state, fixes)
+│   ├── deployment-log.md     ← dated record of what actually happened during deploys (gotchas, state, fixes)
+│   └── research/             ← raw artifacts from one-off research tasks (audit trail; code is source of truth)
 │
 ├── fleet-mcp/                ← MCP adapter; Hermes launches via stdio
 │   └── src/fleet_mcp/

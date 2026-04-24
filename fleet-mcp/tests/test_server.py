@@ -96,8 +96,9 @@ async def test_list_supported_sites(client: Client):
         assert name in sites_by_name
     # Expanded catalogue includes dozens more
     assert len(sites_by_name) >= 100
-    # Every site has a description; blocked_commands may be empty
+    # Every site has a description + both command lists
     for s in data["sites"]:
+        assert isinstance(s["allowed_commands"], list)
         assert isinstance(s["blocked_commands"], list)
         assert len(s["description"]) > 0
     # Sites with known writes expose them via blocked_commands
@@ -107,6 +108,15 @@ async def test_list_supported_sites(client: Client):
     # Read-heavy sites have no blocked_commands
     assert sites_by_name["arxiv"]["blocked_commands"] == []
     assert sites_by_name["wikipedia"]["blocked_commands"] == []
+    # allowed_commands gives the LLM concrete command names to use.
+    # Without this, Hermes guessed `web fetch` on 2026-04-24 (doesn't exist;
+    # only `web read` does); `reddit read` was similarly unreachable.
+    assert "read" in sites_by_name["reddit"]["allowed_commands"]
+    assert "search" in sites_by_name["reddit"]["allowed_commands"]
+    assert sites_by_name["web"]["allowed_commands"] == ["read"]
+    assert "answer" not in sites_by_name["zhihu"]["allowed_commands"]  # blocked
+    # Pure-write sites have empty allowed_commands
+    assert sites_by_name["grok"]["allowed_commands"] == []
 
 
 # ---------------------------------------------------------------------------

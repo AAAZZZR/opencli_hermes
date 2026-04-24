@@ -199,7 +199,7 @@ FORBIDDEN_COMMANDS: frozenset[str] = FORBIDDEN_GLOBAL
 #
 # Methodology: ran `opencli <site> --help` for every site in SUPPORTED_SITES,
 # classified each sub-command as READ (safe) or WRITE (mutates user account /
-# remote state). All WRITE commands end up here. See `.claude/tmp/` for the
+# remote state). All WRITE commands end up here. See `.claude/research/` for the
 # raw categorization and `.claude/deployment-log.md` for the audit trail.
 # ---------------------------------------------------------------------------
 
@@ -258,9 +258,140 @@ FORBIDDEN_PER_SITE: dict[str, frozenset[str]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Full sub-command catalog per site — reads + writes combined.
+#
+# Source of truth for what `opencli <site> <cmd>` actually accepts. Used by
+# `list_supported_sites` to tell the LLM which commands it can call, and by
+# `check_whitelist` to reject guesses like `reddit fetch` or `web fetch`
+# BEFORE they go over the wire (so the error message can hint the correct
+# command name instead of a generic opencli failure).
+#
+# Derived from running `opencli <site> --help` for every site in
+# SUPPORTED_SITES on opencli v1.7.7 (2026-04-24). Regenerate when bumping
+# @jackwener/opencli — see the 2026-04-24 entry in `.claude/deployment-log.md`
+# for the subagent-based methodology, raw output in `.claude/research/`.
+# ---------------------------------------------------------------------------
+
+SITE_COMMANDS: dict[str, frozenset[str]] = {
+    "1688": frozenset({"assets", "download", "item", "search", "store"}),
+    "36kr": frozenset({"article", "hot", "news", "search"}),
+    "51job": frozenset({"company", "detail", "hot", "search"}),
+    "amazon": frozenset({"bestsellers", "discussion", "movers-shakers", "new-releases", "offer", "product", "search"}),
+    "antigravity": frozenset({"dump", "extract-code", "model", "new", "read", "send", "serve", "status", "watch"}),
+    "apple-podcasts": frozenset({"episodes", "search", "top"}),
+    "arxiv": frozenset({"paper", "search"}),
+    "baidu-scholar": frozenset({"search"}),
+    "band": frozenset({"bands", "mentions", "post", "posts"}),
+    "barchart": frozenset({"flow", "greeks", "options", "quote"}),
+    "bbc": frozenset({"news"}),
+    "bilibili": frozenset({"comments", "download", "dynamic", "favorite", "feed", "feed-detail", "following", "history", "hot", "me", "ranking", "search", "subtitle", "user-videos", "video"}),
+    "binance": frozenset({"asks", "depth", "gainers", "klines", "losers", "pairs", "price", "prices", "ticker", "top", "trades"}),
+    "bloomberg": frozenset({"businessweek", "economics", "feeds", "industries", "main", "markets", "news", "opinions", "politics", "tech"}),
+    "bluesky": frozenset({"feeds", "followers", "following", "profile", "search", "starter-packs", "thread", "trending", "user"}),
+    "boss": frozenset({"batchgreet", "chatlist", "chatmsg", "detail", "exchange", "greet", "invite", "joblist", "mark", "recommend", "resume", "search", "send", "stats"}),
+    "chaoxing": frozenset({"assignments", "exams"}),
+    "chatgpt": frozenset({"image"}),
+    "chatgpt-app": frozenset({"ask", "model", "new", "read", "send", "status"}),
+    "chatwise": frozenset({"ask", "export", "history", "model", "read", "send"}),
+    "cnki": frozenset({"search"}),
+    "codex": frozenset({"ask", "export", "extract-diff", "history", "model", "read", "send"}),
+    "coupang": frozenset({"add-to-cart", "search"}),
+    "ctrip": frozenset({"search"}),
+    "cursor": frozenset({"ask", "composer", "export", "extract-code", "history", "model", "read", "send"}),
+    "deepseek": frozenset({"ask", "history", "new", "read", "send", "status"}),
+    "devto": frozenset({"tag", "top", "user"}),
+    "dictionary": frozenset({"examples", "search", "synonyms"}),
+    "discord-app": frozenset({"channels", "delete", "members", "read", "search", "send", "servers", "status"}),
+    "douban": frozenset({"book-hot", "download", "marks", "movie-hot", "photos", "reviews", "search", "subject", "top250"}),
+    "doubao": frozenset({"ask", "detail", "history", "meeting-summary", "meeting-transcript", "new", "read", "send", "status"}),
+    "doubao-app": frozenset({"ask", "dump", "new", "read", "screenshot", "send", "status"}),
+    "douyin": frozenset({"activities", "collections", "delete", "draft", "drafts", "hashtag", "location", "profile", "publish", "stats", "update", "user-videos", "videos"}),
+    "eastmoney": frozenset({"announcement", "convertible", "etf", "holders", "hot-rank", "index-board", "kline", "kuaixun", "longhu", "money-flow", "northbound", "quote", "rank", "sectors"}),
+    "facebook": frozenset({"add-friend", "events", "feed", "friends", "groups", "join-group", "memories", "notifications", "profile", "search"}),
+    "gemini": frozenset({"ask", "deep-research", "deep-research-result", "image", "new"}),
+    "gitee": frozenset({"search", "trending", "user"}),
+    "google": frozenset({"news", "search", "suggest", "trends"}),
+    "google-scholar": frozenset({"search"}),
+    "gov-law": frozenset({"recent", "search"}),
+    "gov-policy": frozenset({"recent", "search"}),
+    "grok": frozenset({"ask"}),
+    "hackernews": frozenset({"ask", "best", "jobs", "new", "search", "show", "top", "user"}),
+    "hf": frozenset({"top"}),
+    "hupu": frozenset({"detail", "hot", "like", "mentions", "reply", "search", "unlike"}),
+    "imdb": frozenset({"person", "reviews", "search", "title", "top", "trending"}),
+    "instagram": frozenset({"comment", "download", "explore", "follow", "followers", "following", "like", "note", "post", "profile", "reel", "save", "saved", "search", "story", "unfollow", "unlike", "unsave", "user"}),
+    "jd": frozenset({"add-cart", "cart", "detail", "item", "reviews", "search"}),
+    "jianyu": frozenset({"detail", "search"}),
+    "jike": frozenset({"comment", "create", "feed", "like", "notifications", "post", "repost", "search", "topic", "user"}),
+    "jimeng": frozenset({"generate", "history", "new", "workspaces"}),
+    "ke": frozenset({"chengjiao", "ershoufang", "xiaoqu", "zufang"}),
+    "lesswrong": frozenset({"comments", "curated", "frontpage", "new", "read", "sequences", "shortform", "tag", "tags", "top", "top-month", "top-week", "top-year", "user", "user-posts"}),
+    "linkedin": frozenset({"search", "timeline"}),
+    "linux-do": frozenset({"categories", "category", "feed", "hot", "latest", "search", "tags", "topic", "topic-content", "user-posts", "user-topics"}),
+    "lobsters": frozenset({"active", "hot", "newest", "tag"}),
+    "maimai": frozenset({"search-talents"}),
+    "medium": frozenset({"feed", "search", "user"}),
+    "mubu": frozenset({"doc", "docs", "notes", "recent", "search"}),
+    "notebooklm": frozenset({"current", "get", "history", "list", "note-list", "notes-get", "open", "source-fulltext", "source-get", "source-guide", "source-list", "status", "summary"}),
+    "notion": frozenset({"export", "favorites", "new", "read", "search", "sidebar", "status", "write"}),
+    "nowcoder": frozenset({"companies", "creators", "detail", "experience", "hot", "jobs", "notifications", "papers", "practice", "recommend", "referral", "salary", "search", "suggest", "topics", "trending"}),
+    "ones": frozenset({"login", "logout", "me", "my-tasks", "task", "tasks", "token-info", "worklog"}),
+    "paperreview": frozenset({"feedback", "review", "submit"}),
+    "pixiv": frozenset({"detail", "download", "illusts", "ranking", "search", "user"}),
+    "producthunt": frozenset({"browse", "hot", "posts", "today"}),
+    "quark": frozenset({"ls", "mkdir", "mv", "rename", "rm", "save", "share-tree"}),
+    "reddit": frozenset({"comment", "frontpage", "hot", "popular", "read", "save", "saved", "search", "subreddit", "subscribe", "upvote", "upvoted", "user", "user-comments", "user-posts"}),
+    "reuters": frozenset({"search"}),
+    "sinablog": frozenset({"article", "hot", "search", "user"}),
+    "sinafinance": frozenset({"news", "rolling-news", "stock", "stock-rank"}),
+    "smzdm": frozenset({"search"}),
+    "spotify": frozenset({"auth", "next", "pause", "play", "prev", "queue", "repeat", "search", "shuffle", "status", "volume"}),
+    "stackoverflow": frozenset({"bounties", "hot", "search", "unanswered"}),
+    "steam": frozenset({"top-sellers"}),
+    "substack": frozenset({"feed", "publication", "search"}),
+    "taobao": frozenset({"add-cart", "cart", "detail", "reviews", "search"}),
+    "tdx": frozenset({"hot-rank"}),
+    "ths": frozenset({"hot-rank"}),
+    "tieba": frozenset({"hot", "posts", "read", "search"}),
+    "tiktok": frozenset({"comment", "explore", "follow", "following", "friends", "like", "live", "notifications", "profile", "save", "search", "unfollow", "unlike", "unsave", "user"}),
+    "twitter": frozenset({"accept", "article", "block", "bookmark", "bookmarks", "delete", "download", "follow", "followers", "following", "hide-reply", "like", "likes", "list-add", "list-remove", "list-tweets", "lists", "notifications", "post", "profile", "reply", "reply-dm", "search", "thread", "timeline", "trending", "tweets", "unblock", "unbookmark", "unfollow"}),
+    "uiverse": frozenset({"code", "preview"}),
+    "v2ex": frozenset({"daily", "hot", "latest", "me", "member", "node", "nodes", "notifications", "replies", "topic", "user"}),
+    "wanfang": frozenset({"search"}),
+    "web": frozenset({"read"}),
+    "weibo": frozenset({"comments", "feed", "hot", "me", "post", "search", "user"}),
+    "weixin": frozenset({"download"}),
+    "weread": frozenset({"ai-outline", "book", "highlights", "notebooks", "notes", "ranking", "search", "shelf"}),
+    "wikipedia": frozenset({"random", "search", "summary", "trending"}),
+    "xianyu": frozenset({"chat", "item", "search"}),
+    "xiaoe": frozenset({"catalog", "content", "courses", "detail", "play-url"}),
+    "xiaohongshu": frozenset({"comments", "creator-note-detail", "creator-notes", "creator-notes-summary", "creator-profile", "creator-stats", "download", "feed", "note", "notifications", "publish", "search", "user"}),
+    "xiaoyuzhou": frozenset({"download", "episode", "podcast", "podcast-episodes", "transcript"}),
+    "xueqiu": frozenset({"comments", "earnings-date", "feed", "fund-holdings", "fund-snapshot", "groups", "hot", "hot-stock", "kline", "search", "stock", "watchlist"}),
+    "yahoo-finance": frozenset({"quote"}),
+    "yollomi": frozenset({"background", "edit", "face-swap", "generate", "models", "object-remover", "remove-bg", "restore", "try-on", "upload", "upscale", "video"}),
+    "youtube": frozenset({"channel", "comments", "feed", "history", "like", "playlist", "search", "subscribe", "subscriptions", "transcript", "unlike", "unsubscribe", "video", "watch-later"}),
+    "yuanbao": frozenset({"ask", "new"}),
+    "zhihu": frozenset({"answer", "comment", "download", "favorite", "follow", "hot", "like", "question", "search"}),
+    "zsxq": frozenset({"dynamics", "groups", "search", "topic", "topics"}),
+}
+
+
 def blocked_commands_for(site: str) -> list[str]:
     """Sorted list of blocked sub-commands for a site (empty if none)."""
     return sorted(FORBIDDEN_PER_SITE.get(site, frozenset()))
+
+
+def allowed_commands_for(site: str) -> list[str]:
+    """Sorted list of sub-commands the LLM may dispatch for this site.
+
+    = all sub-commands opencli exposes for that site, minus FORBIDDEN_GLOBAL,
+    minus FORBIDDEN_PER_SITE[site]. Empty if `site` is unknown.
+    """
+    known = SITE_COMMANDS.get(site, frozenset())
+    blocked = FORBIDDEN_PER_SITE.get(site, frozenset()) | FORBIDDEN_GLOBAL
+    return sorted(known - blocked)
 
 
 def check_whitelist(site: str, command: str) -> str | None:
@@ -270,8 +401,9 @@ def check_whitelist(site: str, command: str) -> str | None:
       1. Site must be in SUPPORTED_SITES.
       2. Command must not be in FORBIDDEN_GLOBAL (framework verbs).
       3. Command must not be in FORBIDDEN_PER_SITE[site] (write operations).
-      Anything else is allowed; unknown sub-commands are rejected downstream
-      by opencli itself.
+      4. Command must exist in SITE_COMMANDS[site] — rejecting unknown
+         sub-commands with a hint saves a round-trip to opencli and gives
+         the LLM a helpful error it can correct from.
     """
     if site not in SUPPORTED_SITES:
         return f"Site '{site}' is not supported."
@@ -288,6 +420,14 @@ def check_whitelist(site: str, command: str) -> str | None:
             f"Command '{site} {command}' is blocked — it is a write/mutation "
             f"action on your account, which fleet-mcp does not allow an LLM to perform. "
             f"Blocked for {site}: {', '.join(sorted(blocked))}."
+        )
+
+    known = SITE_COMMANDS.get(site)
+    if known is not None and command not in known:
+        allowed = allowed_commands_for(site)
+        return (
+            f"Command '{command}' is not a known opencli sub-command for site '{site}'. "
+            f"Allowed for {site}: {', '.join(allowed)}."
         )
 
     return None

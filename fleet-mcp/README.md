@@ -26,7 +26,7 @@ in the monorepo root.
 | Tool | Input | Output |
 |------|-------|--------|
 | `list_nodes()` | — | `{nodes: [{node_id, online, logged_in_sites, ...}]}` |
-| `list_supported_sites()` | — | `{sites: [{site, commands, description}]}` |
+| `list_supported_sites()` | — | `{sites: [{site, description, blocked_commands}]}` |
 | `dispatch(node_id, site, command, args, positional_args)` | dict | `DispatchResult` |
 | `dispatch_best(site, command, args, positional_args)` | dict | `DispatchResult` |
 | `broadcast(site, command, args, positional_args)` | dict | `BroadcastResult` |
@@ -57,21 +57,32 @@ Items are capped at `MAX_ITEMS_INLINE` (default 50) in tool responses.
 Use `get_task_status(task_id)` to retrieve the full normalized record
 list from the hub.
 
-## Security
+## Security (deny-list model)
 
-- **Whitelist** of `(site, command)` pairs in `src/fleet_mcp/security.py`.
-  Unknown site or command is rejected before hitting the hub.
-- **Forbidden commands** globally: `browser, eval, register, install,
-  plugin, daemon, adapter, synthesize, generate, record, exec, shell`.
+- **Sites allow-list** (`SUPPORTED_SITES` in `src/fleet_mcp/security.py`) —
+  flat frozenset of every opencli site (101 as of v1.7.7). Unknown site
+  rejected.
+- **Global forbidden verbs** (`FORBIDDEN_GLOBAL`) — framework commands
+  that never run: `browser, eval, register, install, plugin, daemon,
+  adapter, synthesize, record, exec, shell`.
+- **Per-site write blocks** (`FORBIDDEN_PER_SITE`) — every write-type
+  sub-command that would mutate a user account (`post`, `reply`,
+  `comment`, `like`, `follow`, `subscribe`, `upvote`, `publish`,
+  `delete`, `add-cart`, AI-chat `ask`/`send`/`new`, …). 37 sites have
+  at least one blocked command. Reads are implicitly allowed — unknown
+  sub-commands get rejected downstream by opencli itself.
 - **Rate limit**: 10 req/min per node + 60 req/min globally (token bucket).
 - **Audit log**: JSONL at `~/.fleet-mcp/audit.log`. Args are hashed, not
   raw — they may contain personal search terms.
 - **Output sanitization**: recursively strips fields matching
   `cookie|session|token|authorization|x-csrf-token|(api|access|secret)_key`.
 
+Rationale for the deny-list model: see `.claude/spec.md` §5.2 and
+`.claude/deployment-log.md` (2026-04-24 entry).
+
 ## Tests
 
 ```bash
 .venv/bin/python -m pytest -q
-# 44 passed
+# 47 passed
 ```

@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fleet_mcp.security import (
     RateLimiter,
     _hash_args,
+    allowed_commands_for,
     audit_log,
     check_whitelist,
     sanitize,
@@ -66,6 +67,51 @@ class TestWhitelist:
         err = check_whitelist("arxiv", "shell")
         assert err is not None
         assert "globally forbidden" in err.lower()
+
+    def test_unknown_subcommand_rejected_with_hint(self):
+        # Hermes-level bug we hit on 2026-04-24: it guessed `web fetch` (doesn't
+        # exist; opencli only has `web read`). fleet-mcp should reject early
+        # with a hint so Hermes converges without a round-trip to opencli.
+        err = check_whitelist("web", "fetch")
+        assert err is not None
+        assert "not a known" in err.lower()
+        assert "read" in err  # hint points to the real command
+
+    def test_unknown_subcommand_on_reddit(self):
+        err = check_whitelist("reddit", "fetch")  # historical guess from Hermes
+        assert err is not None
+        assert "read" in err  # reddit.read is the actual post-reading command
+
+
+class TestAllowedCommandsFor:
+    def test_reddit_includes_reads_not_writes(self):
+        cmds = allowed_commands_for("reddit")
+        assert "read" in cmds
+        assert "hot" in cmds
+        assert "search" in cmds
+        assert "subreddit" in cmds
+        # Writes are filtered out
+        assert "comment" not in cmds
+        assert "upvote" not in cmds
+        assert "subscribe" not in cmds
+
+    def test_twitter_many_reads_no_writes(self):
+        cmds = allowed_commands_for("twitter")
+        for read in ("search", "timeline", "thread", "trending", "bookmarks"):
+            assert read in cmds
+        for write in ("post", "reply", "follow", "like", "delete"):
+            assert write not in cmds
+
+    def test_web_only_read(self):
+        assert allowed_commands_for("web") == ["read"]
+
+    def test_pure_write_site_empty(self):
+        # grok/yuanbao are entirely blocked; their allowed set is empty.
+        assert allowed_commands_for("grok") == []
+        assert allowed_commands_for("yuanbao") == []
+
+    def test_unknown_site_empty(self):
+        assert allowed_commands_for("doesnotexist") == []
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,7 @@ from fleet_mcp.schemas import (
 from fleet_mcp.security import (
     SITE_DESCRIPTIONS,
     SUPPORTED_SITES,
+    allowed_commands_for,
     audit_log,
     blocked_commands_for,
     check_whitelist,
@@ -113,13 +114,13 @@ async def list_nodes() -> dict[str, Any]:
 
 @mcp.tool
 async def list_supported_sites() -> dict[str, Any]:
-    """List every site fleet-mcp will dispatch to.
+    """List every site fleet-mcp will dispatch to, with the sub-commands you may call.
 
-    Policy is deny-list: any `opencli <site> <sub-command>` is allowed unless
-    the sub-command appears in `blocked_commands` for that site (write / mutation
-    operations like post, comment, like, follow, upvote, etc.) or in the
-    framework-level global block list. Unknown sub-commands are rejected by
-    opencli downstream, not by fleet-mcp.
+    Use `allowed_commands` to pick a sub-command for `dispatch` / `dispatch_best` /
+    `broadcast`. `blocked_commands` are write / mutation operations (post, reply,
+    comment, like, follow, subscribe, upvote, publish, delete, add-cart, AI-chat
+    ask/send, etc.) that fleet-mcp refuses to run on your account. Unknown
+    sub-commands are also rejected with a hint back to the allowed list.
     """
     audit_log("list_supported_sites")
     return {
@@ -127,6 +128,7 @@ async def list_supported_sites() -> dict[str, Any]:
             SiteInfo(
                 site=site,
                 description=SITE_DESCRIPTIONS.get(site, site),
+                allowed_commands=allowed_commands_for(site),
                 blocked_commands=blocked_commands_for(site),
             ).model_dump()
             for site in sorted(SUPPORTED_SITES)
