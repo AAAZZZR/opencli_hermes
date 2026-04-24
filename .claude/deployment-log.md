@@ -61,6 +61,45 @@ tool response shape. Next `list_supported_sites` call will surface
 `allowed_commands` — Hermes can then `dispatch(site=reddit, command=read,
 positional_args=[post_id])` on the first try.
 
+### Follow-up — docstring nudges (commit c925ed4)
+
+Restarting Hermes didn't solve it. Audit log showed Hermes's post-restart
+session called `reddit search / reddit subreddit / reddit hot` but never
+called `list_supported_sites` to learn about `reddit read`. It reasoned
+from session-memory / training-data mental model ("reddit can only list,
+not read single posts") and never re-discovered capability.
+
+Root cause: MCP transmits tool schemas (name + docstring + param
+descriptions) at session init. The `list_supported_sites` response payload
+(sites, allowed_commands, blocked_commands) is only seen when the tool is
+actually called. If the LLM doesn't call it, our new field is invisible.
+
+Fix — put guidance into the tool-schema layer so the LLM sees it at init:
+
+- `dispatch` / `dispatch_best` / `broadcast` docstrings now open with
+  "Call `list_supported_sites` FIRST for the exact command name" and give
+  command-pattern examples (hot / search → lists; read / article /
+  question / video `<id>` → single item with replies; user / profile
+  `<handle>` → account).
+- `site` Field description: "Site key from list_supported_sites. Call
+  list_supported_sites first if unsure."
+- `command` Field description: "Sub-command from that site's
+  `allowed_commands` in list_supported_sites. Common reads: hot, search,
+  read (single item by id), user, article, question, video, profile.
+  Unknown commands are rejected with a hint."
+- `positional_args` Field description: concrete examples
+  (`reddit read ["1k4j2m3"]`, `zhihu question ["430300881"]`,
+  `bilibili video ["BV1xxx"]`).
+- `check_whitelist` unknown-command error updated from flat list to a
+  direct pointer: "Call `list_supported_sites` to see the full picture —
+  reddit.allowed_commands = [...]".
+
+End-to-end verification (bypassing Hermes, direct hub POST):
+`reddit search "Intel Grandma"` returns URLs containing post IDs →
+`reddit read 1stuql1` returns 44 items (1 POST body + 43 comments, with
+score/author/nesting preserved) in 7.3s. Pipeline fully intact; remaining
+issue was purely LLM discovery behavior.
+
 ## 2026-04-24 — security model flip: allow-list → deny-list
 
 ### Trigger
