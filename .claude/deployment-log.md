@@ -3,6 +3,96 @@
 Records of live deploys. `deployment.md` says *how* to deploy; this says
 *what actually happened*. Append new entries at the top as they occur.
 
+## 2026-04-26 — public REST lockdown + installer reliability + wait=false race fix
+
+### Trigger
+
+Audit on the current `deploy/vps/Caddyfile` showed it only blocked
+`/api/v1/nodes/install/*` from the public reverse proxy. Every other REST
+route was forwarded to `fleet-hub` with no auth. Live spot-check on
+`https://34.46.31.68.sslip.io` confirmed:
+
+- `GET /api/v1/nodes` → returned the node list
+- `GET /api/v1/tasks` → returned task metadata
+- `POST /api/v1/{nodes,tasks}` with bad payload → 422 from FastAPI (i.e. the
+  write routes were live, just rejecting input shape)
+- `GET /api/v1/nodes/install/...` → 403 (the 2026-04-24 block held)
+
+That meant any internet caller could list nodes, dispatch tasks against an
+online agent, delete nodes, or create empty rows. fleet-mcp's deny-list and
+rate limit don't apply here — they only sit in front of fleet-mcp itself, not
+fleet-hub. spec.md §4.1 always assumed "expose with auth if you publish it,"
+but the shipped Caddyfile didn't implement the auth.
+
+### Changes (commit `e4fdf80`)
+
+**Caddy** (`deploy/vps/Caddyfile`): rewritten to an explicit allow-list. Only
+`/health` and `/api/v1/nodes/ws` are reverse-proxied to localhost:8031.
+Everything else under `/api/v1/*` returns 403; non-matching paths return 404.
+The WS endpoint stays public because it has its own per-node-token auth on
+the register frame.
+
+**fleet-hub default `HOST`** (`config.py` + `.env.example`): `0.0.0.0` →
+`127.0.0.1`. `setup.sh` already wrote `127.0.0.1`, so live deploys are
+unaffected; the change protects ad-hoc `python -m fleet_hub` runs without
+an env file from accidentally exposing the unauthenticated REST.
+
+**fleet-hub `wait=false` race** (`api/tasks.py`): the route flushed the
+task row and scheduled `_dispatch_and_persist` as a background task before
+the request session committed. The bg task could run first, fail to find
+the row, raise `RuntimeError("task vanished")`. Fix: explicit
+`await session.commit()` before `asyncio.create_task`, plus a
+`_dispatch_background` wrapper that catches and logs exceptions instead
+of leaving them as asyncio's "Task exception never retrieved". Regression
+test in `tests/test_tasks.py`.
+
+**Installer template encoding** (`api/install.py::_load_template`): both
+`read_text()` calls now pass `encoding="utf-8"`. Without this, Windows dev
+machines (default cp950) fail to load the script because it contains UTF-8
+punctuation.
+
+**`fleet_hub.resources` package marker** (`resources/__init__.py`): added
+so `importlib.resources.files("fleet_hub.resources")` resolves consistently
+in both editable and packaged installs.
+
+**fleet-agent installer** (`fleet-hub/scripts/install-agent.sh`): patches
+the G1 + G2 macOS gotchas from the 2026-04-24 entry below. `OPENCLI_BIN`
+falls back to `$(npm prefix -g)/bin/opencli` when `command -v` returns
+empty (Homebrew node case). All three service paths (launchd plist,
+systemd `--user` unit, nohup fallback) inject a `SERVICE_PATH` env that
+includes `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, and the npm
+bin directory — fixes the launchd `env: node: No such file or directory`
+failure.
+
+**fleet-agent runner Windows-portable kill** (`runner.py`): adds
+`_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)` and a
+`_kill_process_tree(proc)` helper that uses `os.killpg` if available else
+falls back to `proc.kill()`. Test fixtures use `monkeypatch.setattr(...,
+raising=False)`. Runtime is still Unix-only on the agent side; this only
+makes pytest pass on Windows dev machines.
+
+**Doc updates** (deploy + package READMEs): now describe the SSH-pipe
+install flow and the narrowed public surface.
+
+### Verification
+
+- `curl https://34.46.31.68.sslip.io/health` → 200
+- `curl https://34.46.31.68.sslip.io/api/v1/nodes` → 403
+- `curl https://34.46.31.68.sslip.io/api/v1/nodes/install/agent.sh?label=home-wsl` → 403
+- WS `wss://34.46.31.68.sslip.io/api/v1/nodes/ws` with bad token → close 4001 (still routed to hub)
+- VPS-local: `curl http://localhost:8031/api/v1/nodes` works for admin
+- Tests: 51 (fleet-hub) + 26 (fleet-agent) + 54 (fleet-mcp) = 131 passed
+- `home-wsl` reconnected via standard WS exp-backoff after Caddy reload
+
+### Not done / follow-up
+
+- `.claude/develop/install-ticket.md` is still the long-term answer for
+  new-laptop installs that don't have VPS SSH. Lockdown stays until
+  tickets ship.
+- Hub-side rate limit / admin token middleware (defence-in-depth in case
+  localhost isolation is ever broken) — not done.
+- Audit log rotation — still unbounded append; ops issue, not security.
+
 ## 2026-04-24 — security hardening: close installer token-leak + shell-injection path
 
 ### Trigger

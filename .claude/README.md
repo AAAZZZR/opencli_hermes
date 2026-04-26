@@ -164,9 +164,16 @@ section in the same commit.
    substitutes the node's token into the bash script at request time, with
    every value shell-escaped via `shlex.quote`. Anyone who can hit this
    endpoint can download any node's token, so Caddy blocks public access
-   since 2026-04-24 (see `deployment-log.md`). The live flow pipes through
-   SSH to localhost — `develop/install-ticket.md` tracks a planned
-   one-time-URL scheme that would re-open public access safely.
+   (initial installer-only block on 2026-04-24, widened on 2026-04-26 to
+   all of `/api/v1/*` except `/api/v1/nodes/ws` — see `deployment-log.md`).
+   The live flow pipes through SSH to localhost — `develop/install-ticket.md`
+   tracks a planned one-time-URL scheme that would re-open public access
+   safely.
+
+6. **Public Caddy surface is small.** The shipped Caddyfile forwards only
+   `/health` and `/api/v1/nodes/ws` to fleet-hub. Don't add new public
+   handle blocks without putting auth in front. Hub binds to `127.0.0.1`
+   so even bypassing Caddy doesn't expose REST.
 
 ## If you're stuck
 

@@ -172,8 +172,10 @@ opencli_agent/
 ### 4.1 fleet-hub REST API (used by fleet-mcp)
 
 Base path: `/api/v1`. No auth in front of REST — fleet-mcp only talks to it
-over `http://localhost:8031` on the VPS. Expose through a reverse proxy
-with auth if you ever publish it.
+over `http://localhost:8031` on the VPS. The shipped Caddy reverse proxy
+only forwards `/health` and `/api/v1/nodes/ws` publicly (see §5.7); the
+rest of REST stays on localhost. Add real auth at the proxy or in the hub
+before exposing more paths.
 
 ```
 GET    /health                      → {status, version}
@@ -337,16 +339,17 @@ Hermes' context. Full records are always retrievable via `get_task_status`.
 - Revoking a node: `DELETE /api/v1/nodes/{label}`. The active WS is
   force-closed and the row is removed — other nodes unaffected.
 - Installer endpoint (`GET /api/v1/nodes/install/agent.sh?label=<X>`)
-  embeds the node's token in the rendered bash. To stop anyone who
-  guesses a label from scraping tokens off the public URL, the shipped
-  Caddyfile blocks `/api/v1/nodes/install/*` from the reverse proxy
-  since 2026-04-24 — the endpoint is localhost-only, and new-node
-  installs pipe through SSH (see `deployment.md` §3). Labels are also
-  regex-validated (`^[A-Za-z0-9._-]+$`) and every substitution in the
-  bash template goes through `shlex.quote`, closing shell-injection via
-  malicious label. Future planned upgrade: one-time install tickets so
-  we can re-open the public route safely — see
-  `develop/install-ticket.md`.
+  embeds the node's token in the rendered bash. The shipped Caddyfile
+  blocks public access to it — initially only this path was blocked
+  (2026-04-24), then on 2026-04-26 the block was widened to all of
+  `/api/v1/*` except `/api/v1/nodes/ws` after audit found the rest of
+  REST publicly reachable without auth. See `deployment-log.md` for
+  both entries. The endpoint is localhost-only; new-node installs pipe
+  through SSH (see `deployment.md` §3). Labels are regex-validated
+  (`^[A-Za-z0-9._-]+$`) and every substitution in the bash template
+  goes through `shlex.quote`, closing shell-injection via malicious
+  label. Future planned upgrade: one-time install tickets so we can
+  re-open the installer route safely — see `develop/install-ticket.md`.
 
 ### 5.2 Command whitelist (fleet-mcp only) — deny-list model
 
@@ -441,6 +444,25 @@ recursively before anything touches durable storage or crosses to Hermes.
 - Node ↔ central: agent derives `wss://` or `ws://` from the
   `CENTRAL_URL` — use `https://` in production.
 - fleet-mcp ↔ fleet-hub: localhost-only, `http://`.
+
+### 5.7 Public Caddy surface (since 2026-04-26)
+
+The shipped `deploy/vps/Caddyfile` reverse-proxies only two paths to
+fleet-hub:
+
+- `/health` — public health check.
+- `/api/v1/nodes/ws` — agent WebSocket endpoint, authenticated by the
+  per-node token in the register frame (§4.2).
+
+Everything else under `/api/v1/*` returns 403; everything else returns
+404. The hub binds to `127.0.0.1` (since 2026-04-26) so even with Caddy
+disabled the REST surface is not on a public interface. Admin REST calls
+go via SSH to `localhost:8031` on the VPS.
+
+History: the original Caddyfile only blocked `/api/v1/nodes/install/*`
+(2026-04-24, after the installer token-leak audit). Audit on 2026-04-26
+found the rest of REST publicly reachable and widened the block. See
+`deployment-log.md` for both entries.
 
 ---
 

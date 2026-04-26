@@ -103,16 +103,20 @@ recreate.
 
 ## 3. Laptop — install fleet-agent
 
-> **Note (post-2026-04-24):** the installer endpoint is no longer reachable
-> from the public internet. `/api/v1/nodes/install/agent.sh` is blocked at
-> the Caddy layer to stop anyone who guesses a label from downloading the
-> node's token. See `deployment-log.md` for the attack chain that closed.
-> Current flow pipes the installer through SSH — the laptop fetches
-> localhost:8031 on the VPS via the SSH tunnel and runs the output.
+> **Note (post-2026-04-26):** the public Caddy reverse proxy now allows
+> only `/health` and `/api/v1/nodes/ws`. Everything else under `/api/v1/*`
+> returns 403 — installer endpoint, REST CRUD, dispatch, all of it. The
+> 2026-04-24 entry in `deployment-log.md` first blocked the installer
+> (token-leak fix); the 2026-04-26 entry widened the block to the rest of
+> REST after audit found it publicly reachable without auth.
+>
+> All admin REST calls and installer fetches now SSH to the VPS and hit
+> `localhost:8031`. The agent's reverse-WS connection to
+> `/api/v1/nodes/ws` is unaffected — that endpoint stays public and
+> authenticates via the per-node token in the register frame.
 >
 > Future: see `.claude/develop/install-ticket.md` for a planned one-time
-> URL that will restore the pure `curl | bash` UX without SSH. Not built
-> yet.
+> URL that would let us re-open the installer route safely. Not built yet.
 
 In a terminal on the laptop:
 
