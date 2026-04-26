@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -197,6 +198,34 @@ async def test_dispatch_timeout(client: AsyncClient, stub_manager: _StubManager)
     body = resp.json()
     assert body["status"] == "timeout"
     assert body["error_code"] == "TIMEOUT"
+
+
+async def test_dispatch_wait_false_background_task_sees_committed_row(
+    client: AsyncClient,
+    stub_manager: _StubManager,
+) -> None:
+    node = (await client.post("/api/v1/nodes", json={"label": "alice"})).json()
+    stub_manager.mark_online(node["id"])
+    stub_manager.set_result({
+        "type": "result",
+        "success": True,
+        "items": [{"id": "1", "title": "async"}],
+        "exit_code": 0,
+    })
+
+    resp = await client.post("/api/v1/tasks", json={
+        "node_id": "alice", "site": "zhihu", "command": "hot", "wait": False,
+    })
+    assert resp.status_code == 200
+    task_id = resp.json()["id"]
+
+    for _ in range(20):
+        task = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+        if task["status"] == "completed":
+            break
+        await asyncio.sleep(0.01)
+
+    assert task["status"] == "completed"
 
 
 # ---------------------------------------------------------------------------

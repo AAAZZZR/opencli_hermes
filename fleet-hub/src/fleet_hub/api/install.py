@@ -28,12 +28,16 @@ def _load_template() -> str:
     """Load scripts/install-agent.sh shipped with the package."""
     # Files are force-included into fleet_hub/resources/ by pyproject.
     try:
-        return resources.files("fleet_hub.resources").joinpath("install-agent.sh").read_text()
+        return (
+            resources.files("fleet_hub.resources")
+            .joinpath("install-agent.sh")
+            .read_text(encoding="utf-8")
+        )
     except (FileNotFoundError, ModuleNotFoundError):
         # Dev-mode: fall back to the source scripts/ directory.
         from pathlib import Path
         p = Path(__file__).resolve().parents[3] / "scripts" / "install-agent.sh"
-        return p.read_text()
+        return p.read_text(encoding="utf-8")
 
 
 def _render(template: str, *, central_url: str, token: str, label: str) -> str:

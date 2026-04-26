@@ -25,7 +25,6 @@ from fleet_hub.pipeline import store_records
 from fleet_hub.schemas import (
     RecordList,
     TaskCreate,
-    TaskError,
     TaskOut,
     TaskResult,
 )
@@ -60,8 +59,9 @@ async def create_task(payload: TaskCreate, session: AsyncSession = SessionDep) -
 
     if not payload.wait:
         # Fire-and-forget: schedule the dispatch on a background task and return.
+        await session.commit()
         audit("task.created", task_id=task.id, node=node.label, site=task.site, command=task.command)
-        asyncio.create_task(_dispatch_and_persist(task.id))
+        asyncio.create_task(_dispatch_background(task.id))
         return _to_result(task, items=[])
 
     # Synchronous path — commit early so the background dispatch sees the row.
@@ -128,6 +128,13 @@ async def get_task_records(
 
 def _to_result(task: Task, *, items: list[dict]) -> TaskResult:
     return TaskResult.model_validate(task).model_copy(update={"items": items})
+
+
+async def _dispatch_background(task_id: str) -> None:
+    try:
+        await _dispatch_and_persist(task_id)
+    except Exception:
+        logger.exception("background dispatch crashed for task %s", task_id)
 
 
 async def _dispatch_and_persist(task_id: str) -> TaskResult:

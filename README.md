@@ -86,7 +86,8 @@ done
 ## Production layout
 
 See [`.claude/spec.md`](./.claude/spec.md) §7 for the full VPS + per-laptop
-install, including Caddy TLS and the `curl | bash` installer.
+install. The token-bearing installer endpoint is localhost-only on the VPS and
+should be fetched through SSH.
 
 ## License
 

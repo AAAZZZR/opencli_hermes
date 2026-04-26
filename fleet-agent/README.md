@@ -6,8 +6,13 @@ Laptop-side process that connects to `fleet-hub` over WebSocket and runs
 ## Install (recommended: via the hub's installer)
 
 ```bash
-curl -fsSL "https://fleet.yourdomain.com/api/v1/nodes/install/agent.sh?label=alice-mbp" | bash
+ssh <vps-user>@<vps-host> \
+  'curl -s "http://localhost:8031/api/v1/nodes/install/agent.sh?label=alice-mbp"' \
+  | bash
 ```
+
+The installer endpoint returns a script containing the node token, so the
+public reverse proxy should block it. Fetch it through SSH/localhost on the VPS.
 
 The installer:
 - Verifies Python >= 3.11 and Node >= 21

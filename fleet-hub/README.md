@@ -18,7 +18,7 @@ cp .env.example .env
 
 ```bash
 .venv/bin/python -m fleet_hub
-# default: 0.0.0.0:8031
+# default: 127.0.0.1:8031
 ```
 
 The DB (`fleet_hub.db`) is created at startup via
@@ -91,7 +91,9 @@ Everything else is preserved under `extra`.
 `GET /api/v1/nodes/install/agent.sh?label=<label>` reads
 `scripts/install-agent.sh`, substitutes the hub's `PUBLIC_URL`, the node's
 token, its label, `OPENCLI_NPM_SPEC`, and `FLEET_AGENT_INSTALL_SPEC`, then
-returns it as `text/plain`. The laptop pipes it into bash.
+returns it as `text/plain`. This endpoint must stay localhost-only because the
+rendered script contains the node token. Fetch it from the laptop via SSH to
+the VPS, not through the public reverse proxy.
 
 Works on macOS (launchd) and Linux/WSL (systemd --user or nohup fallback).
 

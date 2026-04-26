@@ -1,138 +1,96 @@
-# Deployment — VPS + laptop runbook
+# Deployment: VPS + Laptop Runbook
 
-Target: **Nous Research Hermes** on a VPS commanding **one or more laptops**
-to run `opencli` scrapes against locally-logged-in Chrome sessions.
-
----
+Target: a VPS running Hermes plus `fleet-mcp` and `fleet-hub`, with one or
+more laptops connecting over reverse WebSocket to run OpenCLI against local
+Chrome sessions.
 
 ## Prerequisites
 
-**VPS:**
-- Ubuntu / Debian, reachable public IP, ports 80 + 443 open to the world,
-  port 22 for your SSH
-- A user with sudo rights (the script assumes you sudo as your normal user —
-  don't log in as root)
-- Hermes Agent already installed (or install in step 5)
+VPS:
+- Ubuntu or Debian with public ports 80 and 443 open, plus SSH.
+- A normal sudo-capable user. The setup script expects to be run via `sudo`.
+- Hermes Agent installed, or install it after the hub is up.
 
-**Laptop (per laptop):**
-- macOS / Linux / WSL2 (not Windows native — the installer uses bash)
-- Node.js ≥ 21 (installer will check; install via
-  [nvm](https://github.com/nvm-sh/nvm) if missing)
-- Chrome with the [OpenCLI Bridge extension](https://github.com/jackwener/OpenCLI)
-  loaded (extension comes with `@jackwener/opencli`'s release zip)
+Laptop:
+- macOS, Linux, or WSL2. Native Windows is not supported by the bash installer.
+- Node.js >= 21.
+- Chrome with the OpenCLI Bridge extension and any target sites logged in.
 
-**GitHub repo:**
-- Push this monorepo to GitHub (public preferred — private needs a PAT
-  embedded in `FLEET_AGENT_INSTALL_SPEC`, which is visible to everyone
-  who hits `/api/v1/nodes/install/agent.sh`).
+Repository:
+- Push this monorepo to GitHub. A public repo is simplest.
+- For private repos, plan `FLEET_AGENT_INSTALL_SPEC` carefully. It is embedded
+  into the rendered installer script alongside the node token, so installer
+  fetches must stay on the VPS localhost path.
 
----
-
-## 1. VPS — one-shot install
-
-On the VPS, as your sudo-able user:
+## 1. VPS: Install Central Services
 
 ```bash
-# Clone (public repo)
 sudo install -d -o $USER -g $USER /opt/opencli_agent
 git clone https://github.com/<YOU>/opencli_agent.git /opt/opencli_agent
 cd /opt/opencli_agent
 
-# Run setup — <PUBLIC_IP> is your VPS's external IP
-sudo ./deploy/vps/setup.sh 34.46.31.68 https://github.com/<YOU>/opencli_agent.git
+sudo ./deploy/vps/setup.sh <PUBLIC_IP> https://github.com/<YOU>/opencli_agent.git
 ```
 
-This:
-- apt-installs caddy, python3, git, curl
-- Installs uv (as your user)
-- Builds venvs + installs `fleet-hub` and `fleet-mcp`
-- Writes `.env` files with the sslip.io hostname baked in
-  (e.g. `https://34.46.31.68.sslip.io`)
-- Installs + enables `fleet-hub.service` on systemd
-- Configures Caddy to TLS-terminate for `<IP>.sslip.io`
-- Waits for `/health` locally, prints next steps
+The setup script installs OS packages, Caddy, `uv`, editable venvs for
+`fleet-hub` and `fleet-mcp`, a systemd unit for `fleet-hub`, and a Caddyfile
+for `<PUBLIC_IP>.sslip.io`.
 
-**Firewall check:** `sudo ufw status` — if UFW is on, need `ufw allow 80` and
-`ufw allow 443`. For GCP / AWS, the equivalent security group rules.
+Public Caddy exposure is intentionally narrow:
+- `GET /health` is public.
+- `WS /api/v1/nodes/ws` is public for agents and uses per-node token auth.
+- All other `/api/v1/*` REST routes are localhost-only.
 
-**Verify from your laptop:**
+Verify from another machine:
 
 ```bash
-curl https://34.46.31.68.sslip.io/health
-# → {"status":"ok","version":"0.1.0"}
+curl https://<PUBLIC_IP>.sslip.io/health
 ```
 
-(First request may take 30–60s while Caddy fetches the Let's Encrypt cert.
-If it fails, `sudo journalctl -u caddy -n 100`.)
+## 2. VPS: Register A Node
 
----
-
-## 2. VPS — register a laptop
+Run this on the VPS:
 
 ```bash
 curl -X POST http://localhost:8031/api/v1/nodes \
   -H "content-type: application/json" \
   -d '{"label":"home-wsl"}'
-# → {"id":"<uuid>","label":"home-wsl","token":"<token>","status":"offline",...}
 ```
 
-Copy the `token` — you'll paste it on the laptop in step 3.
+The response includes a token. The installer endpoint also embeds that token
+into the generated script, so do not fetch the installer over the public
+reverse proxy.
 
-Or, if you want the token to stay server-side, **skip this step** — the
-laptop-side installer URL includes the label, and the hub will generate the
-token fresh into the install script response.
+## 3. Laptop: Install Agent
 
----
-
-## 3. Laptop (WSL2 / macOS / Linux) — install the agent
-
-On the laptop:
+Run this on the laptop. SSH reaches the VPS-local installer endpoint and pipes
+the rendered script into bash:
 
 ```bash
-# Prereqs: Node.js ≥ 21
-# If missing, via nvm:
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-source ~/.bashrc      # or ~/.zshrc
-nvm install 22
-
-# Agent install (one-liner from the hub)
-curl -fsSL "https://34.46.31.68.sslip.io/api/v1/nodes/install/agent.sh?label=home-wsl" | bash
+ssh <vps-user>@<PUBLIC_IP> \
+  'curl -s "http://localhost:8031/api/v1/nodes/install/agent.sh?label=home-wsl"' \
+  | bash
 ```
 
-This installs `@jackwener/opencli` globally, creates `~/.fleet-agent/venv`
-with `fleet-agent` pip-installed from GitHub, writes
-`~/.fleet-agent/config.env` (with token + central URL), installs a systemd
-`--user` unit (Linux/WSL) or a launchd plist (macOS), and starts the
-service.
+The installer installs OpenCLI globally, creates `~/.fleet-agent/venv`, installs
+`fleet-agent`, writes `~/.fleet-agent/config.env`, and installs launchd
+on macOS or `systemd --user` on Linux/WSL, falling back to `nohup` when user
+systemd is unavailable.
 
-**Check the agent's log:**
+Check logs:
 
 ```bash
-# Linux / WSL with systemd --user
 journalctl --user -u fleet-agent -f
-
-# If WSL2 systemd isn't enabled:
-# edit /etc/wsl.conf on WSL to add:  [boot]\nsystemd=true
-# then `wsl --shutdown` from PowerShell and reopen the shell.
-
-# macOS
 tail -f ~/.fleet-agent/logs/agent.out.log
 ```
 
-You should see `registered as node home-wsl (<uuid>)`.
-
-**Verify from VPS:**
+Verify from the VPS:
 
 ```bash
 curl http://localhost:8031/api/v1/nodes
-# → [{"label":"home-wsl","status":"online",...}]
 ```
 
-`status:"online"` ⇒ reverse WS tunnel confirmed.
-
----
-
-## 4. VPS — test a dispatch without Hermes
+## 4. VPS: Smoke Test Dispatch
 
 ```bash
 curl -X POST http://localhost:8031/api/v1/tasks \
@@ -140,99 +98,39 @@ curl -X POST http://localhost:8031/api/v1/tasks \
   -d '{"node_id":"home-wsl","site":"zhihu","command":"hot","timeout_sec":30}'
 ```
 
-The laptop's agent log will show `dispatch task=... zhihu/hot`. Response
-arrives with `items: [...]` if Chrome is logged in to Zhihu, or
-`status:"failed"` with `error_code:"AUTH_REQUIRED"` if not (both are
-"the tunnel is working" signals — the latter means log in to Zhihu on the
-laptop and re-dispatch).
+`completed` means the tunnel and OpenCLI path worked. `AUTH_REQUIRED` means the
+tunnel worked but Chrome needs a site login. `CONFIG` usually means OpenCLI or
+Node is not on the agent service PATH.
 
----
+## 5. VPS: Wire Fleet MCP Into Hermes
 
-## 5. VPS — wire fleet-mcp into Hermes
+Merge `docs/hermes-config.yaml` into `~/.hermes/config.yaml`. The important
+shape is:
 
-If Hermes isn't installed yet:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+```yaml
+mcp_servers:
+  fleet:
+    command: "/opt/opencli_agent/fleet-mcp/.venv/bin/python"
+    args: ["-m", "fleet_mcp"]
+    env:
+      HUB_URL: "http://localhost:8031"
+      PYTHONPATH: "/opt/opencli_agent/fleet-mcp/src"
 ```
 
-Then pick a model provider:
-
-```bash
-hermes model                                       # interactive picker
-hermes config set OPENROUTER_API_KEY sk-or-...     # or ANTHROPIC_API_KEY, etc.
-```
-
-Merge the `mcp_servers:` snippet from `docs/hermes-config.yaml` into
-`~/.hermes/config.yaml`:
-
-```bash
-# View the snippet
-cat /opt/opencli_agent/docs/hermes-config.yaml
-
-# Edit the hermes config
-nano ~/.hermes/config.yaml
-# Ensure the mcp_servers.fleet block is present, with these exact paths:
-#   command: "/opt/opencli_agent/fleet-mcp/.venv/bin/python"
-#   args: ["-m", "fleet_mcp"]
-#   env:
-#     HUB_URL: "http://localhost:8031"
-#     PYTHONPATH: "/opt/opencli_agent/fleet-mcp/src"
-```
-
-**Important:** Hermes does NOT honour a `cwd:` field (confirmed against
-upstream `tools/mcp_tool.py`). Use the absolute path to the venv python
-plus `PYTHONPATH` in `env:` as shown.
-
-Start Hermes:
-
-```bash
-hermes           # start chatting
-```
-
-Ask it in natural language: *"List my fleet nodes"* → Hermes should call
-`fleet.list_nodes` and return the laptop status. *"Fetch the Zhihu hot list
-from home-wsl"* → Hermes should call `fleet.dispatch` (or
-`fleet.dispatch_best`) and summarize the result.
-
-Useful pre-flight commands that appear in the Hermes docs:
-
-```bash
-hermes model                                  # interactive model picker
-hermes config set OPENROUTER_API_KEY sk-or-…  # or ANTHROPIC_API_KEY / OPENAI_API_KEY
-hermes setup                                  # full config wizard
-```
-
----
-
-## Troubleshooting
-
-| Symptom | Check |
-|---------|-------|
-| Caddy can't get TLS cert | Ports 80 + 443 open to 0.0.0.0; `journalctl -u caddy -f` |
-| Laptop agent can't connect | `curl https://<ip>.sslip.io/health` from laptop; token correct |
-| `AUTH_REQUIRED` in dispatch | Log in to the site in the laptop's Chrome; restart `fleet-agent` to re-probe |
-| `CONFIG` exit code | `opencli --version` on laptop — binary missing or wrong PATH |
-| `OPENCLI_BIN` wrong path | Edit `~/.fleet-agent/config.env` and `systemctl --user restart fleet-agent` |
-| Hermes doesn't see fleet tools | `hermes` logs — MCP server connect errors usually print at startup |
-
-Audit logs:
-
-- Hub: `~/.fleet-hub/audit.log` (node connects, task lifecycle)
-- fleet-mcp: `~/.fleet-mcp/audit.log` (tool calls, rate-limit decisions)
-
----
+Hermes does not honor `cwd:` for stdio MCP servers; use the absolute venv
+Python path and pass `PYTHONPATH` explicitly.
 
 ## Updating
 
+On the VPS:
+
 ```bash
-# On VPS
 cd /opt/opencli_agent
 git pull
 (cd fleet-hub && .venv/bin/python -m pip install -e .)
 (cd fleet-mcp && .venv/bin/python -m pip install -e .)
 sudo systemctl restart fleet-hub
-
-# On laptop — re-run the installer (idempotent)
-curl -fsSL "https://<ip>.sslip.io/api/v1/nodes/install/agent.sh?label=<label>" | bash
+sudo systemctl reload caddy
 ```
+
+On each laptop, re-run the SSH installer command from step 3.

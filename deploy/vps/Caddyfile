@@ -1,31 +1,41 @@
 # Caddy config for fleet-hub.
-# Replace __PUBLIC_HOST__ with your sslip.io hostname, e.g. 34.46.31.68.sslip.io
+# Replace __PUBLIC_HOST__ with your sslip.io hostname, e.g. 34.46.31.68.sslip.io.
 # Caddy will auto-get Let's Encrypt certs on first boot.
 
 __PUBLIC_HOST__ {
-    encode zstd gzip
+	encode zstd gzip
 
-    # The installer endpoint at /api/v1/nodes/install/* embeds the node's
-    # token in the returned bash script. Exposing it publicly means anyone
-    # who guesses a label can download that node's token. Block it here —
-    # run the installer fetch from inside the VPS instead:
-    #   curl http://localhost:8031/api/v1/nodes/install/agent.sh?label=<label>
-    @installer path /api/v1/nodes/install/*
-    respond @installer 403 {
-        body "installer endpoint is localhost-only. SSH to the VPS and curl http://localhost:8031/api/v1/nodes/install/agent.sh?label=<label>"
-        close
-    }
+	# Public health check only.
+	handle /health {
+		reverse_proxy localhost:8031 {
+			header_up Host {upstream_hostport}
+			header_up X-Real-IP {remote_host}
+		}
+	}
 
-    # WebSocket upgrade for /api/v1/nodes/ws + regular REST proxy
-    reverse_proxy localhost:8031 {
-        header_up Host {upstream_hostport}
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-    }
+	# Agent reverse WebSocket endpoint. Agents authenticate with their node token.
+	handle /api/v1/nodes/ws {
+		reverse_proxy localhost:8031 {
+			header_up Host {upstream_hostport}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# REST is intentionally localhost-only. It has no auth because fleet-mcp
+	# talks to it over localhost and applies command policy before dispatch.
+	handle /api/v1/* {
+		respond 403 {
+			body "fleet-hub REST API is localhost-only. SSH to the VPS and use http://localhost:8031"
+			close
+		}
+	}
+
+	handle {
+		respond 404
+	}
 }
 
-# Redirect bare IP / anything else to the sslip hostname (optional, keeps URLs stable)
+# Redirect bare IP / anything else to the sslip hostname.
 :80, :443 {
-    redir https://__PUBLIC_HOST__{uri} permanent
+	redir https://__PUBLIC_HOST__{uri} permanent
 }

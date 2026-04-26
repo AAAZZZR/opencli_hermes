@@ -10,9 +10,9 @@
 # Example:
 #   sudo ./deploy/vps/setup.sh 34.46.31.68 https://github.com/you/opencli_agent.git
 #
-# After this runs, fleet-hub is on systemd, Caddy proxies https://<ip>.sslip.io,
-# and the install URL for laptops is:
-#   https://<ip>.sslip.io/api/v1/nodes/install/agent.sh?label=<label>
+# After this runs, fleet-hub is on systemd and Caddy exposes only /health plus
+# the agent WebSocket endpoint publicly. REST and the token-bearing installer
+# endpoint stay localhost-only on the VPS.
 
 set -euo pipefail
 
@@ -156,5 +156,7 @@ echo "    -H 'content-type: application/json' \\"
 echo "    -d '{\"label\":\"home-wsl\"}'"
 echo
 echo "Then on laptop (WSL2 / macOS / Linux):"
-echo "  curl -fsSL 'https://${PUBLIC_HOST}/api/v1/nodes/install/agent.sh?label=home-wsl' | bash"
+echo "  ssh ${OWNER_USER}@${PUBLIC_IP} \\"
+echo "    'curl -s http://localhost:8031/api/v1/nodes/install/agent.sh?label=home-wsl' \\"
+echo "    | bash"
 echo "=================================================================="

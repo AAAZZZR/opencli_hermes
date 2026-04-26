@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# fleet-agent installer — substituted & served by fleet-hub.
+# fleet-agent installer. Placeholders are substituted and served by fleet-hub.
 #
-# Placeholders (filled at request time):
+# Placeholders filled at request time:
 #   __CENTRAL_URL__
 #   __NODE_TOKEN__
 #   __NODE_LABEL__
 #   __OPENCLI_NPM_SPEC__
 #   __FLEET_AGENT_INSTALL_SPEC__
 #
-# Usage (from your laptop):
-#   curl -fsSL "https://fleet.yourdomain.com/api/v1/nodes/install/agent.sh?label=alice-mbp" | bash
+# The public reverse proxy blocks this endpoint because the rendered script
+# contains a node token. Fetch it from the VPS over SSH/localhost.
 set -euo pipefail
 
 # Placeholders are replaced by the hub using `shlex.quote`, so each bare
-# __PLACEHOLDER__ expands into a fully shell-safe literal — either a plain
-# word or a single-quoted string. Do NOT add outer quotes around them.
+# __PLACEHOLDER__ expands into a fully shell-safe literal. Do not add outer
+# quotes around them.
 CENTRAL_URL=__CENTRAL_URL__
 NODE_TOKEN=__NODE_TOKEN__
 NODE_LABEL=__NODE_LABEL__
@@ -59,7 +59,7 @@ PY_OK=$(python3 -c 'import sys; print(1 if sys.version_info >= (3,11) else 0)')
 log "python: $PY_VER ok"
 
 if ! command -v node >/dev/null 2>&1; then
-  die "node.js >= 21 required — install via nvm: https://github.com/nvm-sh/nvm"
+  die "node.js >= 21 required; install via nvm: https://github.com/nvm-sh/nvm"
 fi
 NODE_MAJOR=$(node -v | sed -E 's/^v([0-9]+)\..*/\1/')
 [ "$NODE_MAJOR" -ge 21 ] || die "node >= 21 required (found $(node -v))"
@@ -68,12 +68,30 @@ log "node: $(node -v) ok"
 need npm
 
 # ---------------------------------------------------------------------------
-# Install @jackwener/opencli (latest)
+# Install OpenCLI
 # ---------------------------------------------------------------------------
-log "installing $OPENCLI_NPM_SPEC globally…"
+log "installing $OPENCLI_NPM_SPEC globally"
 npm install -g "$OPENCLI_NPM_SPEC"
 
-OPENCLI_VERSION=$(opencli --version 2>/dev/null || echo "unknown")
+NPM_PREFIX=$(npm prefix -g 2>/dev/null || true)
+NPM_BIN=""
+if [ -n "$NPM_PREFIX" ]; then
+  NPM_BIN="${NPM_PREFIX}/bin"
+fi
+
+OPENCLI_BIN=$(command -v opencli || true)
+if [ -z "$OPENCLI_BIN" ] && [ -n "$NPM_BIN" ] && [ -x "${NPM_BIN}/opencli" ]; then
+  OPENCLI_BIN="${NPM_BIN}/opencli"
+fi
+[ -n "$OPENCLI_BIN" ] || die "opencli installed but no executable was found in PATH or ${NPM_BIN:-<unknown npm bin>}"
+
+BASE_SERVICE_PATH="${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+if [ -n "$NPM_BIN" ]; then
+  SERVICE_PATH="${NPM_BIN}:${BASE_SERVICE_PATH}"
+else
+  SERVICE_PATH="$BASE_SERVICE_PATH"
+fi
+OPENCLI_VERSION=$("$OPENCLI_BIN" --version 2>/dev/null || echo "unknown")
 log "opencli: $OPENCLI_VERSION"
 
 # ---------------------------------------------------------------------------
@@ -96,11 +114,11 @@ python -m pip install --upgrade "$FLEET_AGENT_INSTALL_SPEC"
 # ---------------------------------------------------------------------------
 umask 077
 cat > "$CONFIG_FILE" <<EOF
-# fleet-agent config — generated $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# fleet-agent config generated $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 CENTRAL_URL=$CENTRAL_URL
 NODE_TOKEN=$NODE_TOKEN
 NODE_LABEL=$NODE_LABEL
-OPENCLI_BIN=$(command -v opencli)
+OPENCLI_BIN=$OPENCLI_BIN
 AGENT_MODE=bridge
 LOG_LEVEL=INFO
 EOF
@@ -129,6 +147,7 @@ case "$PLATFORM" in
   <key>EnvironmentVariables</key>
   <dict>
     <key>FLEET_AGENT_CONFIG</key><string>${CONFIG_FILE}</string>
+    <key>PATH</key><string>${SERVICE_PATH}</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -143,7 +162,6 @@ EOF
     ;;
 
   linux|wsl)
-    # Prefer systemd --user if available, otherwise fall back to nohup.
     if command -v systemctl >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; then
       UNIT_DIR="${HOME}/.config/systemd/user"
       mkdir -p "$UNIT_DIR"
@@ -158,6 +176,7 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=${CONFIG_FILE}
 Environment=FLEET_AGENT_CONFIG=${CONFIG_FILE}
+Environment=PATH=${SERVICE_PATH}
 ExecStart=${VENV_DIR}/bin/python -m fleet_agent
 Restart=always
 RestartSec=5
@@ -173,9 +192,9 @@ EOF
       log "systemd --user service installed: ${SERVICE_NAME}"
       log "view logs: journalctl --user -u ${SERVICE_NAME} -f"
     else
-      log "systemd --user not available — falling back to nohup"
+      log "systemd --user not available; falling back to nohup"
       pkill -f "fleet_agent" 2>/dev/null || true
-      nohup env FLEET_AGENT_CONFIG="$CONFIG_FILE" \
+      nohup env FLEET_AGENT_CONFIG="$CONFIG_FILE" PATH="$SERVICE_PATH" \
         "$VENV_DIR/bin/python" -m fleet_agent \
         > "$LOG_DIR/agent.out.log" 2> "$LOG_DIR/agent.err.log" &
       log "started via nohup, pid $!"

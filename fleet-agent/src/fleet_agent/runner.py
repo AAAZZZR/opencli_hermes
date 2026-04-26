@@ -19,6 +19,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
 # From OpenCLI src/errors.ts — keep in sync.
 _EXIT_CODE_MAP: dict[int, str] = {
     0: "OK",
@@ -154,6 +156,22 @@ def _parse_error_envelope(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Best-effort timeout cleanup for OpenCLI and its browser helpers."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is not None:
+        try:
+            killpg(proc.pid, _KILL_SIGNAL)
+            return
+        except (ProcessLookupError, PermissionError):
+            return
+
+    try:
+        proc.kill()
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 async def run_opencli(
     opencli_bin: str,
     *,
@@ -200,10 +218,7 @@ async def run_opencli(
         # harmless. After the kill, drain the pipes with a short timeout —
         # `communicate()` was cancelled mid-read, and leaving PIPE transports
         # attached to a killed process leaks FDs on macOS.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        _kill_process_tree(proc)
         try:
             await asyncio.wait_for(proc.communicate(), timeout=2.0)
         except (asyncio.TimeoutError, ProcessLookupError):

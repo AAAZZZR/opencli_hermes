@@ -9,6 +9,7 @@ import pytest
 
 from fleet_agent.runner import (
     _EXIT_CODE_MAP,
+    _KILL_SIGNAL,
     RunResult,
     build_argv,
     run_opencli,
@@ -136,7 +137,7 @@ def fake_proc(monkeypatch):
             proc._killpg_sigs.append(sig)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
-    monkeypatch.setattr("fleet_agent.runner.os.killpg", _fake_killpg)
+    monkeypatch.setattr("fleet_agent.runner.os.killpg", _fake_killpg, raising=False)
     return current
 
 
@@ -215,8 +216,6 @@ async def test_unknown_exit_falls_back_to_generic(fake_proc):
 
 
 async def test_timeout_kills_process_group(fake_proc):
-    import signal
-
     fake_proc["proc"] = _FakeProcess(stdout=b"", stderr=b"", returncode=0, hang=True)
     result = await run_opencli(
         "opencli", site="z", command="h", args={}, positional_args=[], timeout_sec=0.1,
@@ -227,7 +226,7 @@ async def test_timeout_kills_process_group(fake_proc):
     # Runner must killpg (not just proc.kill), sending SIGKILL to the whole
     # process group so Chrome/Bridge helpers die with opencli.
     assert fake_proc["proc"]._killed is True
-    assert signal.SIGKILL in fake_proc["proc"]._killpg_sigs
+    assert _KILL_SIGNAL in fake_proc["proc"]._killpg_sigs
 
 
 async def test_timeout_kill_survives_missing_process(fake_proc, monkeypatch):
@@ -237,7 +236,7 @@ async def test_timeout_kill_survives_missing_process(fake_proc, monkeypatch):
     def _raise(pid, sig):
         raise ProcessLookupError("already gone")
 
-    monkeypatch.setattr("fleet_agent.runner.os.killpg", _raise)
+    monkeypatch.setattr("fleet_agent.runner.os.killpg", _raise, raising=False)
     result = await run_opencli(
         "opencli", site="z", command="h", args={}, positional_args=[], timeout_sec=0.1,
     )
